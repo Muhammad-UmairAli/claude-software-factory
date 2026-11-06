@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 874 556" width="874" height="556" role="img" aria-label="How a job flows: an issue labeled factory goes to the intake agent, which accepts it, asks its author a question, or rejects it. Accepted work is routed, specified and built, then the gate pushes the branch, opens a draft PR and runs your checks: a failure sends it back to the builder, and dependency changes wait for you to allow them. Reviewers check the change and can send it back; the approver approves or escalates to you. By default you merge the PR; with auto_merge on and CI passing, the factory merges it." font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
+<title>How a job flows: an issue labeled factory goes to the intake agent, which accepts it, asks its author a question, or rejects it. Accepted work is routed, specified and built, then the gate pushes the branch, opens a draft PR and runs your checks: a failure sends it back to the builder, and dependency changes wait for you to allow them. Reviewers check the change and can send it back; the approver approves or escalates to you. By default you merge the PR; with auto_merge on and CI passing, the factory merges it.</title>
+<defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#59636E"/></marker></defs>
+<rect x="198" y="28" width="122" height="52" rx="8" fill="#FFF8C5" stroke="#D4A72C" stroke-width="1.5"/>
+<text x="259.0" y="51.0" fill="#633C01" font-size="14" font-weight="600" text-anchor="middle">Author</text>
+<text x="259.0" y="68.0" fill="#7D4E00" font-size="12" text-anchor="middle">answers</text>
+<rect x="376" y="28" width="122" height="52" rx="26" fill="#FFEBE9" stroke="#FF8182" stroke-width="1.5"/>
+<text x="437.0" y="59.0" fill="#82071E" font-size="14" font-weight="600" text-anchor="middle">Rejected</text>
+<rect x="20" y="136" width="122" height="52" rx="26" fill="#F6F8FA" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="81.0" y="159.0" fill="#1F2328" font-size="14" font-weight="600" text-anchor="middle">Issue</text>
+<text x="81.0" y="176.0" fill="#59636E" font-size="12" text-anchor="middle">labeled factory</text>
+<rect x="198" y="136" width="122" height="52" rx="8" fill="#DDF4FF" stroke="#54AEFF" stroke-width="1.5"/>
+<text x="259.0" y="159.0" fill="#0A3069" font-size="14" font-weight="600" text-anchor="middle">Intake</text>
+<text x="259.0" y="176.0" fill="#0550AE" font-size="12" text-anchor="middle">accept or ask</text>
+<rect x="376" y="136" width="122" height="52" rx="3" fill="#FBEFFF" stroke="#C297FF" stroke-width="1.5"/>
+<text x="437.0" y="159.0" fill="#3E1F79" font-size="14" font-weight="600" text-anchor="middle">Route</text>
+<text x="437.0" y="176.0" fill="#6639BA" font-size="12" text-anchor="middle">lite or full</text>
+<rect x="554" y="136" width="122" height="52" rx="8" fill="#DDF4FF" stroke="#54AEFF" stroke-width="1.5"/>
+<text x="615.0" y="159.0" fill="#0A3069" font-size="14" font-weight="600" text-anchor="middle">Spec</text>
+<text x="615.0" y="176.0" fill="#0550AE" font-size="12" text-anchor="middle">testable criteria</text>
+<rect x="732" y="136" width="122" height="52" rx="8" fill="#DDF4FF" stroke="#54AEFF" stroke-width="1.5"/>
+<text x="793.0" y="159.0" fill="#0A3069" font-size="14" font-weight="600" text-anchor="middle">Build</text>
+<text x="793.0" y="176.0" fill="#0550AE" font-size="12" text-anchor="middle">code and commit</text>
+<rect x="732" y="308" width="122" height="52" rx="3" fill="#FBEFFF" stroke="#C297FF" stroke-width="1.5"/>
+<text x="793.0" y="331.0" fill="#3E1F79" font-size="14" font-weight="600" text-anchor="middle">Gate</text>
+<text x="793.0" y="348.0" fill="#6639BA" font-size="12" text-anchor="middle">push, PR, checks</text>
+<rect x="554" y="308" width="122" height="52" rx="8" fill="#DDF4FF" stroke="#54AEFF" stroke-width="1.5"/>
+<text x="615.0" y="331.0" fill="#0A3069" font-size="14" font-weight="600" text-anchor="middle">Review</text>
+<text x="615.0" y="348.0" fill="#0550AE" font-size="12" text-anchor="middle">code, security, UI</text>
+<rect x="376" y="308" width="122" height="52" rx="8" fill="#DDF4FF" stroke="#54AEFF" stroke-width="1.5"/>
+<text x="437.0" y="331.0" fill="#0A3069" font-size="14" font-weight="600" text-anchor="middle">Approve</text>
+<text x="437.0" y="348.0" fill="#0550AE" font-size="12" text-anchor="middle">or escalate</text>
+<rect x="198" y="308" width="122" height="52" rx="3" fill="#FBEFFF" stroke="#C297FF" stroke-width="1.5"/>
+<text x="259.0" y="331.0" fill="#3E1F79" font-size="14" font-weight="600" text-anchor="middle">Merge</text>
+<text x="259.0" y="348.0" fill="#6639BA" font-size="12" text-anchor="middle">policy, sync, gate</text>
+<rect x="20" y="308" width="122" height="52" rx="8" fill="#FFF8C5" stroke="#D4A72C" stroke-width="1.5"/>
+<text x="81.0" y="331.0" fill="#633C01" font-size="14" font-weight="600" text-anchor="middle">You</text>
+<text x="81.0" y="348.0" fill="#7D4E00" font-size="12" text-anchor="middle">merge the PR</text>
+<rect x="732" y="440" width="122" height="52" rx="8" fill="#FFF8C5" stroke="#D4A72C" stroke-width="1.5"/>
+<text x="793.0" y="463.0" fill="#633C01" font-size="14" font-weight="600" text-anchor="middle">You review</text>
+<text x="793.0" y="480.0" fill="#7D4E00" font-size="12" text-anchor="middle">job allow</text>
+<rect x="376" y="440" width="122" height="52" rx="8" fill="#FFF8C5" stroke="#D4A72C" stroke-width="1.5"/>
+<text x="437.0" y="463.0" fill="#633C01" font-size="14" font-weight="600" text-anchor="middle">You decide</text>
+<text x="437.0" y="480.0" fill="#7D4E00" font-size="12" text-anchor="middle">merge or feedback</text>
+<rect x="20" y="440" width="122" height="52" rx="26" fill="#DAFBE1" stroke="#4AC26B" stroke-width="1.5"/>
+<text x="81.0" y="471.0" fill="#044F1E" font-size="14" font-weight="600" text-anchor="middle">Merged</text>
+<polyline points="142,162.0 198,162.0" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="320,162.0 376,162.0" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="498,162.0 554,162.0" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="676,162.0 732,162.0" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="348.0" y="154.0" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="middle">ACCEPT</text>
+<polyline points="239.0,136 239.0,80" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="232.0" y="112" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="end">NEEDS-INFO</text>
+<polyline points="279.0,80 279.0,136" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="286.0" y="112" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="start">reply</text>
+<polyline points="312,136 388,80" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="382" y="118" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="start">REJECT</text>
+<polyline points="773.0,188 773.0,308" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="779.0" y="226" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="start">READY</text>
+<polyline points="817.0,308 817.0,188" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="824.0" y="252" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="start">FAIL</text>
+<polyline points="615.0,308 615.0,264 748,264 748,188" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="681.5" y="257" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="middle">CHANGES</text>
+<polyline points="732,334.0 676,334.0" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="704.0" y="326.0" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="middle">PASS</text>
+<polyline points="554,334.0 498,334.0" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="526.0" y="326.0" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="middle">PASS</text>
+<polyline points="376,334.0 320,334.0" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="348.0" y="326.0" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="middle">APPROVE</text>
+<polyline points="198,334.0 142,334.0" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="170.0" y="326.0" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="middle">default</text>
+<polyline points="773.0,360 773.0,440" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="766.0" y="404" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="end">HOLD</text>
+<polyline points="817.0,440 817.0,360" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="824.0" y="404" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="start">allowed</text>
+<polyline points="437.0,360 437.0,440" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="444.0" y="404" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="start">ESCALATE</text>
+<polyline points="81.0,360 81.0,440" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="259.0,360 259.0,466.0 142,466.0" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="266.0" y="404" fill="#1F2328" font-size="11.5" font-weight="600" text-anchor="start">auto_merge + CI</text>
+<rect x="20" y="525" width="14" height="14" rx="3" fill="#DDF4FF" stroke="#54AEFF" stroke-width="1.5"/>
+<text x="41" y="536" fill="#59636E" font-size="12.5" text-anchor="start">Agent (Claude Code)</text>
+<rect x="175.39999999999998" y="525" width="14" height="14" rx="3" fill="#FBEFFF" stroke="#C297FF" stroke-width="1.5"/>
+<text x="196.39999999999998" y="536" fill="#59636E" font-size="12.5" text-anchor="start">Script</text>
+<rect x="244.99999999999997" y="525" width="14" height="14" rx="3" fill="#FFF8C5" stroke="#D4A72C" stroke-width="1.5"/>
+<text x="266.0" y="536" fill="#59636E" font-size="12.5" text-anchor="start">You, or the issue's author</text>
+</svg>

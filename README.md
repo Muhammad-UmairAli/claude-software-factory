@@ -50,31 +50,10 @@ lists every known limit.
 
 ## How a job flows
 
-```mermaid
-flowchart TD
-    ISSUE(["Issue labeled factory,<br/>from an author with triage or write access"]) --> INTAKE
-    INTAKE["intake agent<br/>accepts, asks or rejects, and rates risk and surfaces"]
-    INTAKE -->|NEEDS-INFO| ASK[["asks the author on the issue,<br/>waits for a reply"]]
-    ASK -->|author replies| INTAKE
-    INTAKE -->|REJECT| REJECTED(["rejected, with the reason on the issue"])
-    INTAKE -->|ACCEPT| ROUTE["route script<br/>picks lite or full and the reviewers"]
-    ROUTE --> SPEC["spec-writer agent<br/>(lite: the script writes the spec)"]
-    SPEC --> BUILD["builder agent<br/>codes and commits in its own worktree"]
-    BUILD --> PUSH["job script<br/>pushes the branch, opens a draft PR"]
-    PUSH --> GATE{"gate script<br/>your checks.sh, on your copy"}
-    GATE -->|FAIL| BUILD
-    GATE -->|"HOLD: dependency files"| HOLD[["you approve them:<br/>job allow"]]
-    HOLD --> GATE
-    GATE -->|PASS| REVIEW["reviewer agents, in parallel<br/>code, security, ux and ui"]
-    REVIEW -->|CHANGES| BUILD
-    REVIEW -->|all PASS| APPROVE["approver agent<br/>(lite: the script approves)"]
-    APPROVE -->|ESCALATE| HUMAN[["waits for you,<br/>labeled factory:needs-human"]]
-    APPROVE -->|APPROVE| MERGE{"job merge<br/>policy, sync with base, gate again"}
-    MERGE -->|"the default"| HUMAN2[["PR ready for you,<br/>labeled factory:approved"]]
-    MERGE -->|"auto_merge allows it and CI passed"| MERGED(["merged"])
-    HUMAN2 -->|you merge| MERGED
-    HUMAN -->|you merge or give feedback| BUILD
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/job-flow-dark.svg">
+  <img alt="How a job flows: an issue labeled factory goes through intake, route, spec, build, the gate, review, approval and merge. A gate failure or review changes send it back to the builder, dependency changes wait for you to allow them, and by default you merge the PR." src="docs/images/job-flow.svg" width="874">
+</picture>
 
 - **Two profiles.** Low risk runs lite: intake's acceptance criteria become the
   spec, one code reviewer looks, the script approves, and a human always
@@ -88,27 +67,10 @@ flowchart TD
 
 ## How it's built
 
-```mermaid
-flowchart LR
-    subgraph HOST["Your machine"]
-        subgraph RT["Runtime container: no host credentials, egress limited to GitHub and an allowlist"]
-            ORCH["Orchestrator<br/>your Claude Code session<br/>running the /factory skill"]
-            AGENTS["Agents<br/>intake, spec-writer, builder,<br/>reviewers, approver"]
-            GUARD{{"guard hook<br/>checks every agent tool call"}}
-            SCRIPTS["Scripts<br/>job, gate, route, doctor"]
-            STATE[("factory/jobs<br/>job state and audit log")]
-            WT[(".worktrees<br/>one checkout per job")]
-        end
-    end
-    GH[("GitHub<br/>issues, PRs, CI")]
-    ORCH -->|spawns| AGENTS
-    AGENTS -.->|every tool call| GUARD
-    ORCH -->|runs| SCRIPTS
-    AGENTS -->|write their one file| STATE
-    AGENTS -->|builder commits| WT
-    SCRIPTS -->|the only writer of job state| STATE
-    SCRIPTS -->|"the only gh and git push"| GH
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
+  <img alt="How it's built: inside the runtime container on your machine, your Claude Code session runs the orchestrator, which spawns the agents and runs the scripts. Every agent tool call passes the guard hook; only the scripts write job state and talk to GitHub." src="docs/images/architecture.svg" width="900">
+</picture>
 
 | Part | What it is | What it may do |
 |---|---|---|
@@ -213,18 +175,10 @@ Everything lives in `factory/config.json`. The defaults are the safe ones.
 
 ## Security model
 
-```mermaid
-flowchart TD
-    IN(["Untrusted input<br/>issue text, comments, branch code"])
-    L1["Before any agent acts<br/>only labeled issues from trusted authors<br/>issue text reaches agents as quoted data, never as a prompt"]
-    L2["While agents work<br/>a guard hook checks every tool call<br/>a seal stops every job if the factory itself changes<br/>the runtime container: no host credentials, egress allowlist"]
-    L3["Before anything merges<br/>the gate runs your copy of checks.sh and holds dependency changes<br/>reviews, plus a security review for sensitive paths<br/>merge policy in code: a human by default, the exact gated commit, CI passed"]
-    OUT(["A merged change"])
-    L4["On everything<br/>an outbound filter on all text posted to GitHub<br/>a hash-chained audit log of every event and guard decision"]
-    IN --> L1 --> L2 --> L3 --> OUT
-    L2 -.- L4
-    L3 -.- L4
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/security-layers-dark.svg">
+  <img alt="The security layers between untrusted input and a merged change: checks before any agent acts, while agents work, and before anything merges, plus an outbound filter, a hash-chained audit log and preflight checks throughout." src="docs/images/security-layers.svg" width="900">
+</picture>
 
 | It protects against | It doesn't protect against |
 |---|---|
@@ -319,6 +273,7 @@ factory/
   runtime/                    the container: Dockerfile, entrypoint, egress firewall, allowlist
   lib/                        the GitHub App identity and the audit log, shared by the scripts
   dashboard.html              the board
+docs/images/                  the README's diagrams; python3 docs/images/diagrams.py redraws them
 tests/                        unit, pipeline, guard-corpus, installer and audit tests (fake gh, local git)
 .github/                      CODEOWNERS, CI, the runtime image check, the weekly Claude Code check, Dependabot
 examples/jobs/                finished jobs from a test run, anonymized
