@@ -1,0 +1,935 @@
+#!/usr/bin/env python3
+"""PreToolUse guard for the factory's agents.
+
+Usage (from an agent's frontmatter hooks):
+  guard <role>        read the hook event on stdin; exit 0 to allow, 2 to block
+
+<role> is the agent's name: intake, spec-writer, builder, reviewer-<lens> or
+approver. The guard enforces what each prompt already asks of its agent:
+
+- Write/Edit only the one factory file the role owns, for a job that is in the
+  role's own stage (the builder may also edit that job's worktree, except
+  protected paths and git internals).
+- Never read secrets: .env files, keys, credential files and folders, shell
+  history; never search or copy a folder that holds them.
+- Bash: no GitHub writes (PRs, issues, labels, merges are the scripts' job), no
+  running the factory's own scripts, no git history rewrites, no pushes at all
+  (the factory pushes the job's branch), no state-changing git in the main checkout, no
+  shell writes into the main checkout or the home folder's dotfiles, no printing
+  the environment or token variables, no pipe-to-shell installs, no sudo.
+  The ux and ui reviewers may not change git state at all.
+- Intake, spec-writer, the code and security reviewers and the approver get an
+  allowlist instead: search and read commands only (ls, find, grep, rg, cat,
+  git log/show/diff...), inside the repository, with no redirects, variables,
+  command substitution or flags that run programs.
+
+Commands are read the way bash reads them: quotes, `cd`, `$(...)`, backticks,
+`bash -c`, heredocs and inline interpreter code (`python3 -c`) are followed, so
+quoting a word or changing folder first doesn't hide it.
+
+This is still a tripwire, not a sandbox: code an agent writes to a file and then
+runs is invisible to it. `factory/bin/job seal` and `verify` catch changes to the
+factory's own files whatever made them, and an isolated machine with a
+fine-grained GitHub token is the real boundary (DESIGN.md, "Security model"). It
+fails closed: if it can't parse an event or a command, it blocks the call.
+"""
+
+import fnmatch
+import glob
+import json
+import os
+import re
+import shlex
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(os.path.realpath(Path(__file__).resolve().parents[2]))
+CONFIG = json.loads((REPO / "factory" / "config.json").read_text())
+BIN = REPO / "factory" / "bin"
+HOME = Path(os.path.realpath(Path.home()))
+JOB_ID = r"\d{3,}-[a-z0-9-]+"
+
+# The one factory file each role writes, and the job stage it writes it in.
+OWN_FILE = {
+    "intake": (rf"factory/jobs/({JOB_ID})/intake\.md", {"intake"}),
+    "spec-writer": (rf"factory/jobs/({JOB_ID})/spec\.md", {"spec"}),
+    "builder": (rf"factory/jobs/({JOB_ID})/build\.md", {"build"}),
+    "approver": (rf"factory/jobs/({JOB_ID})/decision\.md", {"approve"}),
+}
+SECRET_FILES = [".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "id_ecdsa*",
+                "id_dsa*", ".netrc", ".npmrc", ".pypirc", "*.tfstate", "*.tfstate.*", ".git-credentials",
+                ".pgpass", ".vault-token", "credentials.toml", "credentials.tfrc.json",
+                ".*_history", ".history", ".zhistory", ".histfile"]
+SECRET_OK = {".env.example", ".env.sample", ".env.template"}
+SECRET_DIRS = [HOME / d for d in (".ssh", ".aws", ".azure", ".config/gh", ".kube", ".docker", ".gnupg",
+                                  ".claude", ".config/gcloud", ".config/op", ".password-store",
+                                  ".config/git/credentials")]
+SECRET_GLOB = re.compile(r"\.env|\.pem|\.key\b|id_rsa|id_ed25519|credentials|\.npmrc|\.netrc|\.pypirc|_history")
+SPECIAL_FILES = {"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty"}
+# Variables whose names say they hold a secret; no agent expands them.
+SECRET_VAR = re.compile(r"(?i)TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY|"
+                        r"CREDENTIAL|SESSION_?KEY")
+# gh subcommands an agent may run: reading only.
+GH_READ = {("pr", "view"), ("pr", "diff"), ("pr", "list"), ("pr", "checks"), ("pr", "status"),
+           ("issue", "view"), ("issue", "list"), ("repo", "view"), ("auth", "status")}
+
+# Roles that only read: their Bash is an allowlist of search commands, not a denylist. Intake reads
+# raw issue text first; the code and security reviewers and the approver judge code the builder
+# wrote and need to run none of it (the gate already ran the checks). The ux and ui reviewers keep
+# a full shell because they start the dev server to look at pages.
+READ_ONLY_ROLES = {"intake", "spec-writer", "reviewer-code", "reviewer-security", "approver"}
+# Left out on purpose: sort (-o, --compress-program), tree (-o) and git grep (-O, --open-files-in-pager)
+# write files or run programs through flags that can be bundled (sort -ro out), so they can't be
+# filtered reliably; grep/rg, find and ls cover the same searches.
+READ_CMDS = {"cd", "ls", "find", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc",
+             "file", "stat", "pwd", "cut", "basename", "dirname", "realpath", "echo", "true", "git"}
+READ_GIT = {"log", "show", "diff", "ls-files", "ls-tree", "status", "blame", "rev-parse",
+            "shortlog", "cat-file"}
+# Flags that make an otherwise read-only command run programs or write files.
+BAD_FLAGS = {"find": {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"},
+             "rg": {"--pre", "--hostname-bin"},
+             "git": {"-c", "--config-env", "--exec-path", "--output", "--ext-diff", "--textconv"}}
+
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+INTERPRETER = re.compile(r"(python|pypy)[\d.]*|node(js)?|deno|bun|ruby|perl|php|lua|osascript|tclsh|pwsh|"
+                         r"powershell|Rscript|julia")
+AWKS = {"awk", "gawk", "mawk", "nawk"}
+WRAPPERS = {"command", "builtin", "exec", "nohup", "time", "nice", "ionice", "stdbuf", "env", "xargs",
+            "timeout", "caffeinate"}
+WRAPPER_VALUE_FLAGS = {"-n", "-I", "-P", "-L", "-d", "-s", "-E", "-a", "-u", "-C", "-S", "-k", "--signal",
+                       "--kill-after", "--unset", "--chdir"}
+KEYWORDS = {"if", "then", "else", "elif", "fi", "do", "done", "while", "until", "esac", "!", "{", "time"}
+ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*", re.S)
+WRITE_CMDS = {"cp", "mv", "rm", "ln", "chmod", "chown", "chgrp", "truncate", "dd", "install", "tee", "touch",
+              "mkdir", "rmdir", "unlink", "rsync", "patch", "shred", "split", "unzip", "tar", "cpio", "ditto"}
+FIND_RUNS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
+RECURSIVE_CMDS = {"rg", "ag", "ack", "find", "tar", "zip", "rsync", "scp", "7z", "cpio"}
+GIT_NEVER = {"worktree", "update-ref", "filter-branch", "filter-repo", "replace"}
+GIT_CHANGES = {"commit", "push", "reset", "checkout", "switch", "rebase", "merge", "stash", "clean", "restore",
+               "am", "cherry-pick", "revert", "tag", "apply", "pull", "mv", "rm", "add", "notes", "gc", "prune",
+               "update-index", "read-tree", "checkout-index", "commit-tree", "symbolic-ref"}
+PIPES = {"|", "|&"}
+REDIR_OUT = {">", ">>", ">|", "&>", "&>>", ">&"}
+REDIR_IN = {"<", "<>", "<&"}
+PLACEHOLDER = re.compile(r"__factory_(?:sub|doc)_\d+__")
+GLOB_CHARS = re.compile(r"[*?\[]")
+# Inline code that talks to GitHub, and the strings in inline code that may name files.
+GITHUB_CALL = re.compile(r"api\.github\.com|\bGH_TOKEN\b|\bGITHUB_TOKEN\b|['\"]gh['\"]|"
+                         r"\bgh\s+(?:api|auth|pr|issue|label|release|repo|secret|workflow|run|extension|alias)\b")
+LITERAL = re.compile(r"'([^'\n]{1,300})'|\"([^\"\n]{1,300})\"")
+PATHISH = re.compile(r"(?:~|\$\{?HOME\}?)?[\w.@%+,~-]*/[\w./@%+,~-]*")
+
+
+class Blocked(Exception):
+    pass
+
+
+# ---- Paths -------------------------------------------------------------------
+
+
+def inside(path, root):
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve(word, cwd):
+    """Absolute, symlink-resolved path for one tool argument."""
+    p = Path(os.path.expandvars(os.path.expanduser(str(word))))
+    if not p.is_absolute():
+        p = Path(cwd) / p
+    return Path(os.path.realpath(p))
+
+
+def exists(p):
+    try:
+        return p.exists()
+    except OSError:
+        return False
+
+
+def is_secret(path):
+    name = path.name
+    if name not in SECRET_OK and any(fnmatch.fnmatch(name, pat) for pat in SECRET_FILES):
+        return True
+    return any(inside(path, d) for d in SECRET_DIRS)
+
+
+def holds_secrets(path):
+    """True when a credential folder sits inside path, so searching or copying path reaches it."""
+    return any(inside(d, path) for d in SECRET_DIRS)
+
+
+def worktree_part(path):
+    """(job id, path inside the worktree) for a path under .worktrees/, else None."""
+    root = REPO / ".worktrees"
+    if not inside(path, root):
+        return None
+    parts = path.relative_to(root).parts
+    return (parts[0], "/".join(parts[1:])) if parts else None
+
+
+def guarded(path):
+    """Where no shell command may write: the main checkout (the user's files and the factory's),
+    git's own data in a job worktree, git hooks anywhere, and the home folder's dotfiles."""
+    if ".git/hooks" in path.as_posix():
+        return True
+    if inside(path, REPO):
+        wt = worktree_part(path)
+        return wt is None or not wt[0] or wt[1] == ".git" or wt[1].startswith(".git/")
+    if inside(path, HOME) and path != HOME:
+        top = path.relative_to(HOME).parts[0]
+        return top.startswith(".") or path.relative_to(HOME).parts[:2] == ("Library", "LaunchAgents")
+    return False
+
+
+def job_state(job_id):
+    try:
+        return json.loads((REPO / "factory" / "jobs" / job_id / "job.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def require_stage(role, job_id, stages, round_n=None):
+    """Agents write only for the job they work on: one in their own stage (and round)."""
+    job = job_state(job_id)
+    if job.get("stage") not in stages:
+        raise Blocked(f"{role} writes only for a job in its {'/'.join(sorted(stages))} stage; "
+                      f"{job_id} is in {job.get('stage') or 'no known stage'}")
+    if round_n is not None and job.get("round") != round_n:
+        raise Blocked(f"{job_id} is in round {job.get('round')}, not round {round_n}")
+
+
+def may_write(role, path):
+    if inside(path, REPO):
+        relp = path.relative_to(REPO).as_posix()
+        if role.startswith("reviewer-"):
+            lens = re.escape(role.removeprefix("reviewer-"))
+            m = re.fullmatch(rf"factory/jobs/({JOB_ID})/round-(\d+)/review-{lens}\.md", relp)
+            if m:
+                require_stage(role, m[1], {"review"}, int(m[2]))
+                return
+        elif role in OWN_FILE:
+            pattern, stages = OWN_FILE[role]
+            m = re.fullmatch(pattern, relp)
+            if m:
+                require_stage(role, m[1], stages)
+                return
+    if role == "builder":
+        wt = worktree_part(path)
+        if wt and wt[1]:
+            job_id, inner = wt
+            if inner == ".git" or inner.startswith(".git/"):
+                raise Blocked(f"{inner} is git's own data; use git commands instead")
+            if any(fnmatch.fnmatch(inner, pat) for pat in CONFIG.get("protected_paths", [])):
+                raise Blocked(f"{inner} matches protected_paths in factory/config.json; "
+                              "write STATUS: BLOCKED in build.md if the spec needs it changed")
+            require_stage(role, job_id, {"build"})
+            return
+    raise Blocked(f"{role} may not write {path}; it writes only its own factory file"
+                  + (" and its job worktree" if role == "builder" else ""))
+
+
+def check_read(role, path):
+    if is_secret(path):
+        raise Blocked("that file may hold secrets; agents never read it")
+    if role in READ_ONLY_ROLES and not inside(path, REPO) and str(path) not in SPECIAL_FILES and exists(path):
+        raise Blocked(f"{role} reads only inside the repository")
+
+
+# ---- Reading shell text ------------------------------------------------------
+
+
+def _heredoc_word(text, i):
+    """(delimiter, strip tabs, delimiter was quoted, index after it) for `<<` just before text[i]."""
+    strip = text[i:i + 1] == "-"
+    i += strip
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    start = i
+    while i < len(text) and text[i] not in " \t\n;&|<>()":
+        if text[i] in "'\"":
+            end = text.find(text[i], i + 1)
+            i = len(text) if end == -1 else end
+        i += 1
+    raw = text[start:i]
+    word = raw.replace("'", "").replace('"', "").replace("\\", "")
+    return word, strip, raw != word, i
+
+
+def _heredoc_body(text, i, word, strip):
+    """(body, index after its closing line) for a heredoc whose body starts at text[i]."""
+    lines = []
+    while i < len(text):
+        end = text.find("\n", i)
+        line = text[i:] if end == -1 else text[i:end]
+        i = len(text) if end == -1 else end + 1
+        if (line.lstrip("\t") if strip else line) == word:
+            break
+        lines.append(line)
+    return "\n".join(lines), i
+
+
+def _close(text, i, opener="(", closer=")"):
+    """Index of the bracket that closes the one just before text[i]; follows quotes and heredocs."""
+    depth, quote, pending = 1, None, []
+    while i < len(text):
+        c = text[i]
+        if quote == "'":
+            quote = None if c == "'" else quote
+        elif c == "\\":
+            i += 1
+        elif quote == '"':
+            if c == '"':
+                quote = None
+            elif text.startswith("$(", i):
+                i = _close(text, i + 2)
+        elif c in "'\"":
+            quote = c
+        elif text.startswith("<<", i) and not text.startswith("<<<", i):
+            word, strip, _, i = _heredoc_word(text, i + 2)
+            pending.append((word, strip))
+            continue
+        elif c == "\n" and pending:
+            i += 1
+            for word, strip in pending:
+                _, i = _heredoc_body(text, i, word, strip)
+            pending = []
+            continue
+        elif c == "#" and text[i - 1] in " \t\n;&|(":
+            end = text.find("\n", i)
+            i = len(text) if end == -1 else end
+            continue
+        elif c == opener:
+            depth += 1
+        elif c == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise Blocked("couldn't parse the command (unbalanced brackets)")
+
+
+class Scan:
+    """Reads shell text once, the way bash would, and keeps what the checks need:
+
+    - plain text with unquoted newlines turned into `;`, each $(...), backtick, <(...)
+      and >(...) replaced by a placeholder word, and each heredoc body taken out
+      (`<<WORD` becomes `<< <placeholder>`);
+    - subs: the command inside each placeholder, checked on its own;
+    - docs: each heredoc body, and whether its delimiter was quoted;
+    - names: every variable expanded outside single quotes ('' for $1, $? and the like)."""
+
+    def __init__(self):
+        self.subs, self.docs, self.names = {}, {}, []
+
+    def key(self, kind):
+        return f"__factory_{kind}_{len(self.subs) + len(self.docs)}__"
+
+    def sub(self, inner):
+        key = self.key("sub")
+        self.subs[key] = inner
+        self.names.append("")
+        return key
+
+    def read(self, text):
+        out, quote, pending, i, n = [], None, [], 0, len(text)
+        while i < n:
+            c, nxt = text[i], text[i + 1:i + 2]
+            if quote == "'":
+                out.append(c)
+                quote = None if c == "'" else quote
+                i += 1
+                continue
+            if c == "\\":
+                if nxt != "\n":  # a backslash-newline joins two lines
+                    out.append(text[i:i + 2])
+                i += 2
+                continue
+            if c == "$":
+                if nxt == "'" and quote is None:  # $'...' quotes like '...'
+                    out.append("'")
+                    quote = "'"
+                    i += 2
+                    continue
+                if nxt == "(":
+                    end = _close(text, i + 2)
+                    out.append(self.sub(text[i + 2:end]))
+                    i = end + 1
+                    continue
+                if nxt == "{":
+                    end = _close(text, i + 2, "{", "}")
+                    inner = text[i + 2:end]
+                    m = re.match(r"[!#]?([A-Za-z_][A-Za-z0-9_]*)", inner)
+                    self.names.append(m.group(1) if m else "")
+                    self.read(inner)  # ${X:-$(cmd)} runs cmd
+                    out.append(text[i:end + 1])
+                    i = end + 1
+                    continue
+                m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[i + 1:])
+                if m:
+                    self.names.append(m.group(0))
+                    out.append("$" + m.group(0))
+                    i += 1 + len(m.group(0))
+                    continue
+                if nxt and nxt in "0123456789?!$@*#-":
+                    self.names.append("")
+                out.append(c)
+                i += 1
+                continue
+            if c == "`":
+                end = i + 1
+                while end < n and text[end] != "`":
+                    end += 2 if text[end] == "\\" else 1
+                if end >= n:
+                    raise Blocked("couldn't parse the command (unclosed backtick)")
+                out.append(self.sub(text[i + 1:end]))
+                i = end + 1
+                continue
+            if quote == '"':
+                out.append(c)
+                quote = None if c == '"' else quote
+                i += 1
+                continue
+            # Outside quotes from here on.
+            if c in "'\"":
+                quote = c
+                out.append(c)
+                i += 1
+            elif c in "<>" and nxt == "(":
+                end = _close(text, i + 2)
+                out.append(self.sub(text[i + 2:end]))
+                i = end + 1
+            elif text.startswith("<<<", i):
+                out.append(" <<< ")
+                i += 3
+            elif text.startswith("<<", i):
+                word, strip, quoted, i = _heredoc_word(text, i + 2)
+                key = self.key("doc")
+                self.docs[key] = ("", quoted)  # the body arrives after the end of this line
+                pending.append((key, word, strip, quoted))
+                out.append(f" << {key} ")
+            elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()"):
+                end = text.find("\n", i)
+                i = n if end == -1 else end
+            elif c == "\n":
+                out.append(" ; ")
+                i += 1
+                for key, word, strip, quoted in pending:
+                    body, i = _heredoc_body(text, i, word, strip)
+                    self.docs[key] = (body, quoted)
+                    if not quoted:  # an unquoted heredoc expands $VAR, $(...) and backticks
+                        self.read('"' + body.replace("\\", "\\\\").replace('"', '\\"') + '"')
+                pending = []
+            else:
+                out.append(c)
+                i += 1
+        if quote:
+            raise Blocked("couldn't parse the command (unclosed quote)")
+        return "".join(out)
+
+
+def tokenize(plain):
+    lex = shlex.shlex(plain, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    lex.commenters = ""
+    try:
+        return list(lex)
+    except ValueError:
+        raise Blocked("couldn't parse the command")
+
+
+def split(tokens):
+    """[(words, the separator after them)] for each simple command."""
+    out, cur = [], []
+    for t in tokens:
+        if t == "}" or (t and set(t) <= set(";&|()")):
+            out.append((cur, t))
+            cur = []
+        else:
+            cur.append(t)
+    out.append((cur, None))
+    return out
+
+
+def redirects(tokens):
+    """(words, output targets, input sources, heredoc keys, here-strings) of one simple command."""
+    words, outs, ins, docs, strings = [], [], [], [], []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if t.isdigit() and nxt in REDIR_OUT | REDIR_IN | {"<<", "<<<"}:  # a file descriptor number
+            i += 1
+        elif t in REDIR_OUT or t in REDIR_IN:
+            if nxt is not None and not (t in {">&", "<&"} and (nxt.isdigit() or nxt == "-")):
+                (outs if t in REDIR_OUT else ins).append(nxt)
+            i += 2
+        elif t in {"<<", "<<<"}:
+            if nxt is not None:
+                (docs if t == "<<" else strings).append(nxt)
+            i += 2
+        elif t and set(t) <= set("<>&"):
+            raise Blocked("couldn't parse a redirect in the command")
+        else:
+            words.append(t)
+            i += 1
+    return words, outs, ins, docs, strings
+
+
+# ---- Checking a command ------------------------------------------------------
+
+
+class Shell:
+    """The guard's picture of one Bash call: the role and the folders a word may be relative to."""
+
+    def __init__(self, role, cwd):
+        self.role = role
+        self.read_only = role in READ_ONLY_ROLES
+        self.here = {Path(os.path.realpath(cwd))}
+
+    def child(self):
+        """A subshell: folder changes inside it don't last."""
+        other = Shell.__new__(Shell)
+        other.role, other.read_only, other.here = self.role, self.read_only, set(self.here)
+        return other
+
+
+def candidates(sh, word):
+    """Every real path a shell word can name, from each folder the command may run in."""
+    if not word or len(word) > 4096 or PLACEHOLDER.search(word):
+        return []
+    w = os.path.expandvars(os.path.expanduser(word))
+    out = []
+    for base in ([None] if os.path.isabs(w) else sorted(sh.here)):
+        raw = w if base is None else os.path.join(base, w)
+        try:
+            out.append(Path(os.path.realpath(raw)))
+            # An unquoted glob such as ~/.a?s/credentials expands to real files; check those too.
+            if GLOB_CHARS.search(word) and ("/" in word or word[:1] in ".~"):
+                out += [Path(os.path.realpath(m)) for m in glob.glob(raw)[:200]]
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def path_words(args):
+    """The words of an argument list that may name files, including values of --flag=value and key=value."""
+    out = []
+    for a in args:
+        if a.startswith("-"):
+            if "=" in a:
+                out.append(a.split("=", 1)[1])
+            continue
+        out.append(a)
+        key, eq, value = a.partition("=")
+        if eq and "/" not in key:
+            out.append(value)
+    return out
+
+
+def check_paths(sh, reads, writes=(), recursive=False):
+    for w in reads:
+        for p in candidates(sh, w):
+            if is_secret(p):
+                raise Blocked(f"{p.name} may hold secrets; agents never read it")
+            if recursive and holds_secrets(p):
+                raise Blocked(f"{p} holds credential files; agents never search or copy it")
+    for w in writes:
+        for p in candidates(sh, w):
+            if guarded(p):
+                raise Blocked(f"no shell writes to {p}: agents write only in their job's worktree and temp folders")
+            wt = worktree_part(p)
+            if wt and (sh.role != "builder" or job_state(wt[0]).get("stage") != "build"):
+                raise Blocked("only the builder writes in a job's worktree, during that job's build stage")
+
+
+def env_dump(words):
+    """True when the command prints environment variables, which hold tokens."""
+    name, rest = os.path.basename(words[0]), words[1:]
+    if name == "printenv":
+        return True
+    if name == "env":
+        i = 0
+        while i < len(rest) and (rest[i].startswith("-") or ASSIGN.fullmatch(rest[i])):
+            i += 2 if rest[i] in {"-u", "--unset", "-C", "--chdir"} else 1
+        return i >= len(rest)
+    if name in {"export", "declare", "typeset", "readonly"}:
+        return not rest or any(re.fullmatch(r"-[A-Za-z]*[px][A-Za-z]*", a) for a in rest)
+    if name == "set":
+        return not rest
+    if name == "compgen":
+        return any(a in {"-v", "-e", "-A"} for a in rest)
+    return False
+
+
+def unwrap(words):
+    """The command under wrappers such as `command`, `env X=1`, `xargs -n1` or `timeout 30`,
+    and whether it takes its arguments from stdin (xargs)."""
+    from_stdin = False
+    while words:
+        if env_dump(words):
+            raise Blocked("don't print the environment; it holds tokens")
+        name = os.path.basename(words[0])
+        if name not in WRAPPERS:
+            break
+        from_stdin = from_stdin or name == "xargs"
+        words = words[1:]
+        while words and (words[0].startswith("-") or ASSIGN.fullmatch(words[0])):
+            words = words[2:] if words[0] in WRAPPER_VALUE_FLAGS else words[1:]
+        if name == "timeout" and words and re.fullmatch(r"\d+(\.\d+)?[smhd]?", words[0]):
+            words = words[1:]
+    return words, from_stdin
+
+
+def inline_code(cmd, args):
+    """(code strings, reads its program from stdin, script) for a shell, interpreter or awk call."""
+    if cmd in AWKS:
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            if args[i] == "-f":
+                return [], False, args[i + 1] if i + 1 < len(args) else None
+            i += 2 if args[i] in {"-v", "-F"} else 1
+        return args[i:i + 1], False, None
+    codes, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            break
+        if a.startswith("--"):
+            name, eq, value = a.partition("=")
+            if name in {"--eval", "--print", "--command", "--exec"}:
+                codes.append(value if eq else (args[i + 1] if i + 1 < len(args) else ""))
+                i += 1 if eq else 2
+            else:
+                i += 1
+            continue
+        if a.startswith("-") and len(a) > 1:
+            if a in {"-c", "-Command", "-command"} or (re.fullmatch(r"-[A-Za-z]+", a) and a[-1] in "ceEpr"):
+                if i + 1 < len(args):
+                    codes.append(args[i + 1])
+                i += 2
+                continue
+            if a == "-m":
+                return codes, False, None
+            i += 1
+            continue
+        if a == "-":
+            return codes, not codes, None
+        return codes, False, (None if codes else a)
+    return codes, not codes, None
+
+
+def check_code(sh, code):
+    """Inline code (python3 -c, node -e, a heredoc fed to an interpreter) can read and write any
+    file, so it may not name secrets or the main checkout, or call GitHub."""
+    if GITHUB_CALL.search(code):
+        raise Blocked("inline code may not call GitHub; factory/bin/job does that")
+    words = [a or b for a, b in LITERAL.findall(code)] + PATHISH.findall(code)
+    for w in words:
+        for p in candidates(sh, w):
+            if is_secret(p):
+                raise Blocked(f"{p.name} may hold secrets; agents never read it")
+            if guarded(p):
+                raise Blocked(f"inline code may not touch {p}; it belongs to the user or the factory")
+
+
+def check_gh(args):
+    pos = [a for a in args if not a.startswith("-")]
+    sub, verb = (pos + [None, None])[:2]
+    if sub == "api":
+        method = None
+        for i, a in enumerate(args):
+            if a in {"-X", "--method"}:
+                method = args[i + 1] if i + 1 < len(args) else ""
+            elif a.startswith("--method="):
+                method = a.split("=", 1)[1]
+            elif a.startswith("-X"):
+                method = a[2:].lstrip("=")
+            if a in {"-f", "-F", "--field", "--raw-field", "--input"} or re.match(r"-[fF].|--(raw-)?field=|--input=", a):
+                raise Blocked("gh api is read-only for agents; the scripts make GitHub changes")
+        if method is not None and method.upper() not in {"GET", "HEAD"}:
+            raise Blocked("gh api is read-only for agents; the scripts make GitHub changes")
+        return
+    if sub == "auth" and any(a in {"-t", "--show-token"} for a in args):
+        raise Blocked("agents never print the GitHub token")
+    if sub is not None and (sub, verb) not in GH_READ:
+        raise Blocked(f"`gh {sub} {verb or ''}` changes GitHub; factory/bin/job does that, not agents")
+
+
+def check_git(sh, args):
+    """Block the git calls the role may not make. Returns True when the call changes files or refs."""
+    i, dirs = 0, []
+    while i < len(args) and args[i].startswith("-"):
+        if args[i] in {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}:
+            if args[i] == "-C" and i + 1 < len(args):
+                dirs.append(args[i + 1])
+            i += 2
+        else:
+            i += 1
+    sub, rest = (args[i], args[i + 1:]) if i < len(args) else (None, [])
+    if sh.read_only:
+        if sub not in READ_GIT:
+            raise Blocked(f"read-only shell: `git {sub}` isn't one of {', '.join(sorted(READ_GIT))}")
+        return False
+    if sub in GIT_NEVER:
+        raise Blocked("no git worktree, update-ref or history-rewriting commands")
+    if sub == "remote" and rest[:1] and rest[0] in {"add", "set-url", "remove", "rm", "rename", "set-head",
+                                                   "set-branches", "prune"}:
+        raise Blocked("no changing git remotes")
+    if sub == "config" and not any(r in {"--get", "--get-all", "--get-regexp", "--list", "-l"} for r in rest):
+        raise Blocked("no changing git config")
+    if sub == "branch" and any(r in {"--delete", "--move", "--copy", "--force", "--set-upstream-to",
+                                     "--unset-upstream", "-u"} or re.fullmatch(r"-[A-Za-z]*[dDmMcCf][A-Za-z]*", r)
+                               for r in rest):
+        raise Blocked("no deleting, moving or forcing branches")
+    if sub not in GIT_CHANGES:
+        return False
+    if sh.role != "builder":
+        raise Blocked(f"{sh.role} only reads the branch; it never changes git state")
+    if sub == "push":
+        # The factory pushes the job's branch itself when the build moves to the gate (A16).
+        raise Blocked("agents don't push: commit and stop; the factory pushes the job's branch")
+    # Commits, checkouts and the like belong in the job's worktree, never in the main checkout.
+    bases = [p for d in dirs for p in candidates(sh, d)] or sorted(sh.here)
+    if any(inside(b, REPO) and worktree_part(b) is None for b in bases):
+        raise Blocked("git commands that change files run in your worktree only (cd <worktree> && ...)")
+    return True
+
+
+def move(sh, args, before, after):
+    """Follow `cd` so later words resolve from the right folder."""
+    target = next((a for a in args if not a.startswith("-")), "~")
+    if target == "-":
+        return
+    found = candidates(sh, target)
+    for p in found:
+        if is_secret(p):
+            raise Blocked(f"{p.name} may hold secrets; agents never read it")
+        if sh.read_only and not inside(p, REPO) and exists(p):
+            raise Blocked("read-only shell: stay inside the repository")
+    if before in PIPES or after in PIPES or after == "&":
+        return  # runs in a subshell: the next command stays where it was
+    if found and all(p.is_dir() for p in found):
+        sh.here = set(found)
+    else:
+        sh.here |= set(found)  # cd may fail, so the next command may run in either folder
+
+
+def recursive(cmd, args):
+    if cmd in RECURSIVE_CMDS:
+        return True
+    if cmd in {"grep", "egrep", "fgrep", "zgrep", "cp", "ls"}:
+        return any(a in {"--recursive", "--dereference-recursive", "--directories=recurse"}
+                   or (re.fullmatch(r"-[A-Za-z]+", a) and ("r" in a or "R" in a or (cmd == "cp" and "a" in a)))
+                   for a in args)
+    return False
+
+
+def writes_args(cmd, args):
+    """True when the command writes or deletes the files named in its arguments."""
+    if cmd in WRITE_CMDS:
+        return True
+    if cmd == "find":
+        return any(a in FIND_RUNS for a in args)
+    if cmd in {"sed", "gsed", "perl", "ruby"}:
+        return any(a == "--in-place" or a.startswith("--in-place=")
+                   or (not a.startswith("--") and re.match(r"-[A-Za-z]*i", a)) for a in args)
+    if cmd in {"curl", "wget"}:
+        return any(a in {"--output", "--output-document", "--remote-name", "--create-dirs"}
+                   or a.startswith(("--output=", "--output-document=")) or re.fullmatch(r"-[A-Za-z]*[oO]", a)
+                   for a in args)
+    return False
+
+
+def check_read_only(sh, words, outs, ins, docs, strings, before, after):
+    if docs or strings:
+        raise Blocked("read-only shell: no heredocs")
+    if any(o not in SPECIAL_FILES for o in outs):
+        raise Blocked("read-only shell: no redirects")
+    if not words:
+        return
+    cmd, args = os.path.basename(words[0]), words[1:]
+    if cmd not in READ_CMDS:
+        raise Blocked(f"read-only shell: `{cmd}` isn't one of {', '.join(sorted(READ_CMDS))}")
+    bad = BAD_FLAGS.get(cmd, set())
+    if any(w in bad or any(w.startswith(b + "=") for b in bad) for w in args):
+        raise Blocked(f"read-only shell: `{cmd}` with that flag can run programs or write files")
+    if cmd == "git":
+        check_git(sh, args)
+    if cmd == "cd":
+        move(sh, args, before, after)
+        return
+    check_paths(sh, path_words(args) + ins, recursive=recursive(cmd, args))
+    for w in path_words(args) + ins:
+        for p in candidates(sh, w):
+            if not inside(p, REPO) and str(p) not in SPECIAL_FILES and exists(p):
+                raise Blocked("read-only shell: stay inside the repository")
+
+
+def check_command(sh, tokens, scan, depth, before, after, feed):
+    """Check one simple command. Returns (command name, arguments) for the pipeline that follows."""
+    words, outs, ins, docs, strings = redirects(tokens)
+    if sh.read_only:
+        check_read_only(sh, words, outs, ins, docs, strings, before, after)
+        return (os.path.basename(words[0]) if words else None), words[1:]
+    while words and (ASSIGN.fullmatch(words[0]) or words[0] in KEYWORDS):
+        words = words[1:]
+    words, from_stdin = unwrap(words)
+    if not words:
+        check_paths(sh, outs + ins, outs)
+        return None, []
+    head, args = words[0], words[1:]
+    cmd = os.path.basename(head)
+    if cmd in {"sudo", "su", "doas", "pkexec"}:
+        raise Blocked("no sudo or su")
+    if cmd in {"cd", "pushd"}:
+        move(sh, args, before, after)
+        return cmd, args
+    if cmd == "eval":
+        analyze(" ".join(args), sh, depth + 1)
+        return cmd, args
+    interp = cmd in SHELLS or cmd in AWKS or bool(INTERPRETER.fullmatch(cmd))
+    codes, reads_stdin, script = inline_code(cmd, args) if interp else ([], False, None)
+    runs = candidates(sh, head) if "/" in head else []
+    if script:
+        if PLACEHOLDER.fullmatch(script):
+            raise Blocked("run a script file from the worktree, not generated or downloaded code")
+        runs += candidates(sh, script)
+    if cmd in {"source", "."} and args:
+        runs += candidates(sh, args[0])
+    if any(inside(p, BIN) for p in runs):
+        raise Blocked("factory/bin scripts are the orchestrator's; agents never run them")
+    if cmd == "gh":
+        check_gh(args)
+    changes = check_git(sh, args) if cmd == "git" else False
+    if interp:
+        bodies = [scan.docs[k][0] for k in docs if k in scan.docs] + strings
+        if feed[1] and reads_stdin and not bodies:
+            raise Blocked("no piping downloads into a shell")
+        stdin = bodies or (feed[0] if reads_stdin else [])
+        for code in codes + stdin:
+            if cmd in SHELLS:
+                analyze(code, sh.child(), depth + 1)
+            else:
+                check_code(sh, code)
+    reads = [w for w in path_words(args) if w not in codes] + ins + outs
+    writes = list(outs)
+    if changes or writes_args(cmd, args):
+        writes += path_words(args)
+    if from_stdin:  # xargs: the arguments arrive through the pipe
+        reads += feed[0]
+        writes += feed[0] if writes_args(cmd, args) else []
+    check_paths(sh, reads, writes, recursive(cmd, args))
+    return cmd, args
+
+
+def analyze(command, sh, depth=0):
+    """Check one Bash command line; raise Blocked when it breaks the role's rules."""
+    if depth > 4:
+        raise Blocked("the command nests too deeply to check")
+    scan = Scan()
+    plain = scan.read(command)
+    if sh.read_only and (scan.names or scan.subs):
+        raise Blocked("read-only shell: no variables or command substitution")
+    hidden = [n for n in scan.names if n and SECRET_VAR.search(n)]
+    if hidden:
+        raise Blocked(f"${hidden[0]} may hold a secret; agents never expand it")
+    for inner in scan.subs.values():
+        analyze(inner, sh.child(), depth + 1)
+    stack, piped, downloaded, before = [], [], False, None
+    for words, after in split(tokenize(plain)):
+        feed = (piped, downloaded) if before in PIPES else ([], False)
+        cmd, args = check_command(sh, words, scan, depth, before, after, feed)
+        if after in PIPES:
+            piped, downloaded = feed[0] + args, feed[1] or cmd in {"curl", "wget"}
+        else:
+            piped, downloaded = [], False
+        if after == "(":
+            stack.append(set(sh.here))
+        elif after == ")" and stack:
+            sh.here = stack.pop()
+        before = after
+
+
+def decide(role, event):
+    """Raise Blocked when the tool call breaks the role's rules."""
+    tool = event.get("tool_name", "")
+    args = event.get("tool_input") or {}
+    cwd = event.get("cwd") or str(REPO)
+    if tool in {"Write", "Edit", "MultiEdit", "NotebookEdit"}:
+        target = args.get("file_path") or args.get("notebook_path")
+        if not target:
+            raise Blocked(f"{tool} without a path")
+        may_write(role, resolve(target, cwd))
+    elif tool == "Read":
+        check_read(role, resolve(args.get("file_path", ""), cwd))
+    elif tool in {"Grep", "Glob"}:
+        roots = [args.get("path") or cwd]
+        prefix = re.split(r"[*?\[{]", args.get("pattern") or "", maxsplit=1)[0] if tool == "Glob" else ""
+        if prefix.startswith(("/", "~", "$")):
+            roots.append(os.path.dirname(prefix) or prefix)
+        for root in roots:
+            p = resolve(root, cwd)
+            check_read(role, p)
+            if holds_secrets(p):
+                raise Blocked("that folder holds credential files; agents never search it")
+        if tool == "Grep" and SECRET_GLOB.search(args.get("glob") or ""):
+            raise Blocked("those files may hold secrets; agents never search them")
+    elif tool == "Bash":
+        analyze(args.get("command", ""), Shell(role, cwd))
+
+
+SECRETISH = re.compile(r"(?i)(bearer\s+|token[=:]\s*|password[=:]\s*|ghp_|gho_|github_pat_|sk-ant-|sk-)[^\s'\"]+")
+
+
+def log(role, event, decision, reason=None):
+    """Append the decision to factory/jobs/guard.jsonl, the guard's audit trail.
+
+    Allowed calls record only role and tool; blocked calls add the reason and
+    the first 200 characters of the command or path, with token-like strings
+    masked. Logging never changes the decision."""
+    try:
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "role": role,
+               "agent_type": event.get("agent_type"), "tool": event.get("tool_name"), "decision": decision}
+        if reason:
+            args = event.get("tool_input") or {}
+            detail = str(args.get("command") or args.get("file_path") or args.get("path") or "")[:200]
+            rec.update(reason=reason, detail=SECRETISH.sub(r"\1***", detail))
+        jobs = REPO / "factory" / "jobs"
+        jobs.mkdir(parents=True, exist_ok=True)
+        with (jobs / "guard.jsonl").open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+        # The same decision, hash-chained into the central audit log (factory/lib/audit.py).
+        sys.path.append(str(REPO / "factory" / "lib"))
+        import audit
+        audit.Log(jobs / "audit", CONFIG).append("guard", "decision", **{k: v for k, v in rec.items() if k != "ts"})
+    except Exception:
+        pass
+
+
+def main(argv):
+    if len(argv) != 1:
+        print("usage: guard <role>", file=sys.stderr)
+        sys.exit(2)
+    event = {}
+    try:
+        event = json.load(sys.stdin)
+        decide(argv[0], event)
+    except Blocked as e:
+        log(argv[0], event, "block", str(e))
+        print(f"factory guard ({argv[0]}): blocked: {e}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as e:  # fail closed
+        log(argv[0], event if isinstance(event, dict) else {}, "block", f"guard error: {type(e).__name__}")
+        print(f"factory guard ({argv[0]}): could not check this call ({type(e).__name__}: {e}); blocked",
+              file=sys.stderr)
+        sys.exit(2)
+    log(argv[0], event, "allow")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

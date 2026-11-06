@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Build and enter the factory's runtime container.
+
+Usage:
+  runtime build      build the image from factory/runtime (again after any change there)
+  runtime shell      start a shell in the container, with this repository at /workspace
+  runtime command    print the docker command `shell` runs, without running it
+
+Inside, run `claude`, then `/factory run`. The container gets this repository,
+two named volumes (Claude Code's login and gh's config, so you log in once),
+your git name and email, and, when github_app is set up, the App's private key
+read-only. Nothing else from your machine: no SSH agent, no ~/.gitconfig or
+credential helper, no cloud credentials. It starts with an egress firewall
+(factory/runtime/init-firewall.sh) and then runs as an unprivileged user that
+can't get root back.
+
+The dashboard: inside, run `python3 -m http.server --bind 0.0.0.0 8000` from
+factory/ and open http://127.0.0.1:8000/dashboard.html on your machine; the
+port is published on 127.0.0.1 only.
+"""
+
+import hashlib
+import json
+import os
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+RUNTIME = REPO / "factory" / "runtime"
+CONFIG = json.loads((REPO / "factory" / "config.json").read_text())
+TESTED = REPO / ".github" / "claude-code-tested"  # absent in projects the factory is installed into
+DEFAULT_KEY = "~/.config/software-factory/github-app.pem"
+
+
+def die(msg):
+    print(f"runtime: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def claude_version():
+    """The Claude Code version to install: the one the guard hooks were last checked against."""
+    if TESTED.exists():
+        return TESTED.read_text().strip()
+    return None  # the Dockerfile's default
+
+
+def image():
+    """The image tag for the current runtime files and Claude Code version, so `shell` never runs a
+    stale build."""
+    h = hashlib.sha256((claude_version() or "").encode())
+    for p in sorted(RUNTIME.iterdir()):
+        if p.is_file():
+            h.update(p.name.encode() + b"\0" + p.read_bytes() + b"\0")
+    return f"software-factory-runtime:{h.hexdigest()[:12]}"
+
+
+def build_args():
+    version = claude_version()
+    return (["docker", "build", "--tag", image()]
+            + (["--build-arg", f"CLAUDE_CODE_VERSION={version}"] if version else []) + [str(RUNTIME)])
+
+
+def git_identity():
+    """Your git name and email, so the builder's commits carry them. Not a credential."""
+    env = {}
+    for key, names in (("user.name", ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME")),
+                       ("user.email", ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"))):
+        res = subprocess.run(["git", "config", key], cwd=REPO, capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            env.update(dict.fromkeys(names, res.stdout.strip()))
+    return env
+
+
+def app_key_mount():
+    """The --mount for the GitHub App's private key, read-only, at the path config.json names as the
+    container sees it, or [] without an App."""
+    app = CONFIG.get("github_app") or {}
+    if not app.get("app_id"):
+        return []
+    configured = app.get("private_key") or DEFAULT_KEY
+    source = Path(os.path.expanduser(configured))
+    if not source.is_file():
+        die(f"the GitHub App private key {source} doesn't exist (github_app.private_key)")
+    target = "/home/node/" + configured[2:] if configured.startswith("~/") else configured
+    return ["--mount", f"type=bind,source={source},target={target},readonly"]
+
+
+def run_args():
+    # Named volumes per repository, so two projects' logins don't mix.
+    volume = "software-factory-" + hashlib.sha256(str(REPO).encode()).hexdigest()[:8]
+    args = ["docker", "run", "--rm", "--interactive", "--tty", "--init",
+            "--cap-add=NET_ADMIN", "--cap-add=NET_RAW", "--security-opt", "no-new-privileges",
+            "--mount", f"type=bind,source={REPO},target=/workspace",
+            "--mount", f"type=volume,source={volume}-claude,target=/home/node/.claude",
+            "--mount", f"type=volume,source={volume}-gh,target=/home/node/.config/gh",
+            "--publish", "127.0.0.1:8000:8000"]
+    args += app_key_mount()
+    for name, value in git_identity().items():
+        args += ["--env", f"{name}={value}"]
+    return args + [image(), "bash"]
+
+
+def check_committed():
+    """Build only what was committed: an uncommitted change to the firewall or the allowlist (code
+    an agent ran could make one) must not reach an image."""
+    res = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all", "--", str(RUNTIME)],
+                         cwd=REPO, capture_output=True, text=True)
+    if res.returncode != 0 or res.stdout.strip():
+        die("factory/runtime has uncommitted changes; commit them through review first:\n" + res.stdout.rstrip())
+
+
+def main(argv):
+    if argv == ["build"]:
+        check_committed()
+        sys.exit(subprocess.run(build_args()).returncode)
+    elif argv == ["command"]:
+        print(shlex.join(run_args()))
+    elif argv == ["shell"]:
+        args = run_args()
+        if subprocess.run(["docker", "image", "inspect", args[-2]], capture_output=True).returncode != 0:
+            die(f"no image {args[-2]} for the current runtime files; run factory/bin/runtime build first")
+        os.execvp("docker", args)
+    else:
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

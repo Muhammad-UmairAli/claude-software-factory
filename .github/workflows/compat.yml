@@ -1,0 +1,48 @@
+# Weekly early warning for changes outside this repository that the factory
+# depends on. A failed scheduled run emails the person who last changed this
+# file, so someone looks before the next /factory run.
+name: compat
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  claude-code:
+    name: Claude Code release vs. last smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The guard depends on how Claude Code runs agent hooks, and cost tracking on
+      # its transcript format. Neither is a documented contract, so every new release
+      # needs a live check that the guard hooks still run (RUNBOOK.md, "Claude Code
+      # upgrade") before the factory runs on it.
+      - name: Compare versions
+        run: |
+          latest="$(npm view @anthropic-ai/claude-code version)"
+          tested="$(tr -d '[:space:]' < .github/claude-code-tested)"
+          echo "Latest Claude Code: $latest. Last smoke-tested: $tested."
+          if [ "$latest" != "$tested" ]; then
+            echo "::error::Claude Code $latest is out, but the guard hooks were last smoke-tested on $tested. Check the guard hooks live (RUNBOOK.md, Claude Code upgrade), then put $latest in .github/claude-code-tested."
+            exit 1
+          fi
+
+  newest-python:
+    name: tests on the newest Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+      - run: python -m unittest discover -s tests

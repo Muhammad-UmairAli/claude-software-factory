@@ -1,0 +1,511 @@
+#!/usr/bin/env python3
+"""Preflight for the factory. Run it after installing and before every /factory run.
+
+Usage:
+  doctor              every check, including GitHub (labels, branch protection)
+  doctor --offline    local checks only (config, agents, scripts, .gitignore)
+
+Prints one line per check: `ok`, `warn` or `FAIL`. Exits 1 when anything
+fails, so the orchestrator stops before it starts a job on a broken install.
+"""
+
+import fnmatch
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+FACTORY = REPO / "factory"
+sys.path.append(str(FACTORY / "lib"))  # appended, so the standard library always wins a name clash
+import github_app  # noqa: E402  (factory/lib: the GitHub App identity shared with job)
+import audit  # noqa: E402  (factory/lib: the hash-chained audit log)
+AGENTS = REPO / ".claude" / "agents"
+MODELS = {"haiku", "sonnet", "opus", "fable"}
+RISKS = ["low", "medium", "high"]
+ROLES = ["intake", "spec-writer", "builder", "approver"]
+FRONTMATTER_KEYS = {"name", "description", "tools", "model", "hooks"}
+
+results = []
+
+
+def report(level, msg):
+    results.append(level)
+    print(f"{level:<4}  {msg}")
+
+
+def sh(*cmd):
+    try:
+        return subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return subprocess.CompletedProcess(cmd, 127, "", str(e))
+
+
+def frontmatter(path):
+    """Top-level keys and the raw text of an agent file's YAML frontmatter."""
+    text = path.read_text()
+    m = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    if not m:
+        return set(), ""
+    keys = {line.split(":", 1)[0] for line in m.group(1).splitlines() if re.match(r"[A-Za-z]", line)}
+    return keys, m.group(1)
+
+
+def check_config():
+    try:
+        cfg = json.loads((FACTORY / "config.json").read_text())
+    except (OSError, ValueError) as e:
+        report("FAIL", f"factory/config.json doesn't parse: {e}")
+        return None
+    problems = []
+    for key in ("concurrency", "max_rounds", "base_branch", "merge_method", "labels", "routing",
+                "surface_reviewers", "protected_paths", "prices_usd_per_mtok"):
+        if key not in cfg:
+            problems.append(f"missing {key}")
+    if not isinstance(cfg.get("concurrency"), int) or cfg.get("concurrency", 0) < 1:
+        problems.append("concurrency must be an integer ≥ 1")
+    if not isinstance(cfg.get("max_rounds"), int) or cfg.get("max_rounds", 0) < 1:
+        problems.append("max_rounds must be an integer ≥ 1")
+    if cfg.get("merge_method") not in {"merge", "squash", "rebase"}:
+        problems.append("merge_method must be merge, squash or rebase")
+    if cfg.get("auto_merge", {}).get("max_risk", "low") not in RISKS:
+        problems.append(f"auto_merge.max_risk must be one of {', '.join(RISKS)}")
+    if cfg.get("issue_authors", "collaborators") not in {"collaborators", "anyone"}:
+        problems.append("issue_authors must be collaborators or anyone")
+    budget = cfg.get("max_cost_usd_per_job")
+    if budget is not None and not (isinstance(budget, (int, float)) and budget > 0):
+        problems.append("max_cost_usd_per_job must be a positive number or null")
+    for risk in RISKS:
+        if risk not in cfg.get("routing", {}):
+            problems.append(f"routing has no {risk!r} entry")
+    tables = [cfg.get("models", {}), *cfg.get("routing", {}).values(), *cfg.get("surface_reviewers", {}).values()]
+    for table in tables:
+        for name, model in table.items():
+            if model not in MODELS:
+                problems.append(f"{name}: model {model!r} isn't one of {', '.join(sorted(MODELS))}")
+    reviewers = {n for t in [*cfg.get("routing", {}).values(), *cfg.get("surface_reviewers", {}).values()] for n in t}
+    for name in sorted(reviewers):
+        if not (AGENTS / f"reviewer-{name}.md").exists():
+            problems.append(f"routed reviewer {name!r} has no .claude/agents/reviewer-{name}.md")
+    for label in ("queue", "needs_info", "needs_human"):
+        if label not in cfg.get("labels", {}):
+            problems.append(f"labels.{label} is missing")
+    if problems:
+        for p in problems:
+            report("FAIL", f"config.json: {p}")
+    else:
+        report("ok", "config.json is valid")
+    if cfg.get("concurrency", 1) > 1:
+        report("warn", f"concurrency is {cfg['concurrency']}; start with 1 until you trust the factory's PRs")
+    if budget is None:
+        report("warn", "max_cost_usd_per_job is null; jobs have no cost ceiling")
+    check_auto_merge(cfg)
+    if cfg.get("issue_authors") == "anyone":
+        report("warn", "issue_authors is 'anyone': outside authors' text reaches the agents")
+    return cfg
+
+
+def check_auto_merge(cfg):
+    """Say exactly which PRs merge unattended. A job auto-merges only when auto_merge is on, its
+    risk is at or below max_risk, and its profile is full: lite PRs always wait for a human."""
+    am = cfg.get("auto_merge", {})
+    limit = am.get("max_risk", "low")
+    if not am.get("enabled") or limit not in RISKS:
+        return
+    profiles = cfg.get("profiles", {})
+    in_reach = RISKS[:RISKS.index(limit) + 1]
+    eligible = [r for r in in_reach if profiles.get(r, "full") == "full"]
+    lite = [r for r in in_reach if r not in eligible]
+    lite_note = f" ({', '.join(f'{r}-risk' for r in lite)} PRs run lite and always wait for a human)" if lite else ""
+    if not eligible:
+        report("warn", f"auto_merge is on but nothing can merge{lite_note}. Map a risk to full in `profiles`, "
+                       "raise max_risk, or turn auto_merge off")
+    else:
+        report("warn", f"auto_merge is on: {', '.join(f'{r}-risk' for r in eligible)} PRs merge without a human "
+                       f"once the approver approves{lite_note}")
+
+
+SECRET_REF = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)")
+
+
+def workflow_triggers(text):
+    """{event: the text under it} for a workflow's `on:` section. The standard library has no YAML
+    parser, so this reads by indentation; it is good enough to decide when to warn."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"""^["']?on["']?\s*:\s*(.*)$""", line)
+        if not m:
+            continue
+        inline = m.group(1).split("#")[0].strip()
+        if inline:
+            return {name: "" for name in re.findall(r"[a-z_]+", inline)}
+        events, current, indent = {}, None, None
+        for nxt in lines[i + 1:]:
+            if nxt.strip() and not nxt.startswith((" ", "\t")):
+                break
+            if not nxt.strip() or nxt.strip().startswith("#"):
+                continue
+            depth = len(nxt) - len(nxt.lstrip())
+            indent = depth if indent is None else indent
+            if depth == indent:
+                current = nxt.strip().lstrip("-").split(":")[0].strip()
+                events[current] = ""
+            elif current:
+                events[current] += nxt.strip() + "\n"
+        return events
+    return {}
+
+
+def branch_patterns(block, key):
+    """The patterns listed under `key:` (inline or as dashed items) in a trigger's text."""
+    lines = block.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith(key + ":"):
+            inline = line.split(":", 1)[1].strip().strip("[]")
+            if inline:
+                return [p.strip().strip("'\"") for p in inline.split(",") if p.strip()]
+            items = []
+            for nxt in lines[i + 1:]:
+                if not nxt.startswith("-"):
+                    break
+                items.append(nxt.lstrip("- ").strip().strip("'\""))
+            return items
+    return []
+
+
+def workflow_exposure(text):
+    """Why this workflow can hand secrets to code on a factory/* branch, or None."""
+    secrets = sorted({s for s in SECRET_REF.findall(text) if s != "GITHUB_TOKEN"})
+    if not secrets:
+        return None
+    named = ", ".join(secrets)
+    events = workflow_triggers(text)
+    if "pull_request_target" in events:
+        return (f"runs on pull_request_target with secrets ({named}); every PR, a factory PR included, runs "
+                "with them. Avoid pull_request_target or check out only the base commit")
+    sample = "factory/001-x"
+    if "push" in events:
+        ignored = branch_patterns(events["push"], "branches-ignore")
+        allowed = branch_patterns(events["push"], "branches")
+        reaches = not any(fnmatch.fnmatch(sample, p) for p in ignored) and (
+            not allowed or any(fnmatch.fnmatch(sample, p) for p in allowed))
+        if reaches:
+            return (f"gives secrets ({named}) to code on any pushed branch, factory/* included. Add "
+                    "branches-ignore: ['factory/**'] to its push trigger, or move the secrets into an environment "
+                    "that requires a reviewer")
+    if "pull_request" in events:
+        return (f"gives secrets ({named}) to pull requests from branches in this repository, factory PRs "
+                "included. Skip factory branches (if: !startsWith(github.head_ref, 'factory/')) or move the "
+                "secrets into an environment that requires a reviewer")
+    return None
+
+
+def check_ci_exposure():
+    """Factory branches are pushed before any human review, so CI that gives secrets to their code is a
+    way out for an agent that went wrong."""
+    flows = sorted((REPO / ".github" / "workflows").glob("*.y*ml"))
+    if not flows:
+        return
+    flagged = 0
+    for path in flows:
+        try:
+            why = workflow_exposure(path.read_text())
+        except (OSError, UnicodeDecodeError):
+            why = "couldn't be read"
+        if why:
+            flagged += 1
+            report("warn", f"CI: {path.relative_to(REPO).as_posix()} {why}")
+    if not flagged:
+        report("ok", "CI: no workflow gives secrets to factory branches")
+
+
+def token_scopes():
+    """Scopes of the token gh uses, from the X-OAuth-Scopes response header. Classic and OAuth
+    tokens list theirs; fine-grained and GitHub App tokens send none (an empty set). None when
+    the call fails. The token itself is never read."""
+    res = sh("gh", "api", "-i", "user")
+    if res.returncode != 0:
+        return None
+    head = res.stdout.replace("\r\n", "\n").split("\n\n", 1)[0]
+    for line in head.splitlines():
+        name, _, value = line.partition(":")
+        if name.strip().lower() == "x-oauth-scopes":
+            return {s.strip() for s in value.split(",") if s.strip()}
+    return set()
+
+
+def check_token():
+    scopes = token_scopes()
+    if scopes is None:
+        report("warn", "GitHub token: couldn't read its scopes (gh api -i user failed)")
+    elif "repo" in scopes:
+        report("FAIL", "GitHub token: a classic or OAuth token with the `repo` scope, which reaches every repository "
+                       "you can access, including other clients'. Use a fine-grained token limited to this repository "
+                       "(Contents, Issues and Pull requests: read and write), for example through GH_TOKEN")
+    elif scopes:
+        report("warn", f"GitHub token: a classic or OAuth token with scopes {', '.join(sorted(scopes))}; prefer a "
+                       "fine-grained token limited to this repository")
+    else:
+        report("ok", "GitHub token: fine-grained or app token (no classic scopes)")
+
+
+def check_files(cfg):
+    py = sys.version_info
+    report("ok" if py >= (3, 10) else "FAIL", f"python {py.major}.{py.minor} (need 3.10+)")
+    for name in ("job", "gate", "route", "guard", "doctor"):
+        p = FACTORY / "bin" / name
+        if not p.exists():
+            report("FAIL", f"factory/bin/{name} is missing")
+        elif not os.access(p, os.X_OK):
+            report("FAIL", f"factory/bin/{name} isn't executable (chmod +x)")
+    checks = FACTORY / "checks.sh"
+    if not checks.exists():
+        report("FAIL", "factory/checks.sh is missing")
+    elif "has no checks yet" in checks.read_text():
+        report("FAIL", "factory/checks.sh is still the placeholder; add the repo's real checks")
+    else:
+        report("ok", "factory/checks.sh has checks")
+
+    for role in ROLES + sorted(p.stem for p in AGENTS.glob("reviewer-*.md")):
+        path = AGENTS / f"{role}.md"
+        if not path.exists():
+            report("FAIL", f".claude/agents/{role}.md is missing")
+            continue
+        keys, raw = frontmatter(path)
+        unknown = keys - FRONTMATTER_KEYS
+        if unknown:
+            report("FAIL", f"{role}.md has unknown frontmatter keys {sorted(unknown)} (typos are ignored silently)")
+        if f"factory/bin/guard {role}" not in raw:
+            report("FAIL", f"{role}.md has no PreToolUse hook running `factory/bin/guard {role}`")
+    report("ok", "agent files checked")
+
+    ignored = sh("git", "check-ignore", "factory/jobs/x", ".worktrees/x")
+    if ignored.returncode != 0 or len(ignored.stdout.split()) != 2:
+        report("FAIL", ".gitignore must ignore /factory/jobs/ and /.worktrees/")
+    else:
+        report("ok", "factory/jobs/ and .worktrees/ are gitignored")
+
+    settings = REPO / ".claude" / "settings.json"
+    try:
+        sandbox = json.loads(settings.read_text()).get("sandbox", {}) if settings.exists() else {}
+    except ValueError:
+        sandbox = {}
+        report("FAIL", ".claude/settings.json doesn't parse")
+    if sandbox.get("enabled"):
+        report("ok", "Claude Code Bash sandbox is enabled in .claude/settings.json")
+    else:
+        report("warn", "Claude Code Bash sandbox is off; agents' shell commands run with your full access "
+                       "(see DESIGN.md, Security model)")
+
+    check_ci_exposure()
+
+    uses_browser = any(n in {"ux", "ui"} for t in cfg.get("surface_reviewers", {}).values() for n in t)
+    if uses_browser and sh("agent-browser", "--version").returncode != 0:
+        report("warn", "agent-browser isn't on PATH; the builder and the ux/ui reviewers can't look at pages")
+
+
+MANAGED_SETTINGS = [
+    Path("/Library/Application Support/ClaudeCode/managed-settings.json"),  # macOS
+    Path("/etc/claude-code/managed-settings.json"),                          # Linux
+    Path.home() / ".claude" / "remote-settings.json",                        # org policy delivered remotely
+]
+
+
+def policy_flags(paths):
+    """Merged org-policy flags that change how the factory's safeguards work."""
+    flags = {}
+    for path in paths:
+        files = [path] + sorted(path.parent.glob("managed-settings.d/*.json")) if path.name == "managed-settings.json" else [path]
+        for f in files:
+            try:
+                data = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            for key in ("allowManagedHooksOnly", "disableAllHooks", "allowManagedPermissionRulesOnly"):
+                if data.get(key):
+                    flags[key] = str(f)
+    return flags
+
+
+def check_policy(paths=MANAGED_SETTINGS):
+    """The guard is a hook; an org policy can switch hooks or project rules off."""
+    flags = policy_flags(paths)
+    for key in ("allowManagedHooksOnly", "disableAllHooks"):
+        if key in flags:
+            report("FAIL", f"{key} is set by {flags[key]}: the agents' guard hooks won't run. "
+                           "Ask the policy owner to allow project hooks or ship factory/bin/guard as a managed hook")
+    for settings in (REPO / ".claude" / "settings.json", REPO / ".claude" / "settings.local.json"):
+        try:
+            if json.loads(settings.read_text()).get("disableAllHooks"):
+                report("FAIL", f"disableAllHooks is set in {settings.relative_to(REPO)}: the guard won't run")
+        except (OSError, ValueError):
+            pass
+    if "allowManagedPermissionRulesOnly" in flags:
+        report("warn", "org policy allows managed permission rules only: allow/deny rules in .claude/settings.json "
+                       "are ignored; the managed rules and the guard apply")
+    return flags
+
+
+def claude_config_file():
+    """Claude Code's own config file: folder trust and MCP servers live there."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(base) / ".claude.json" if base else Path.home() / ".claude.json"
+
+
+def check_trust(config_file=None):
+    """Claude Code runs project agent hooks only in a trusted folder; headless runs never ask."""
+    if config_file is None:
+        config_file = claude_config_file()
+    try:
+        projects = json.loads(Path(config_file).read_text()).get("projects", {})
+    except (OSError, ValueError):
+        report("warn", "couldn't read Claude Code's config to confirm this folder is trusted")
+        return None
+    here = Path(os.path.realpath(REPO))
+    for path in (here, *here.parents):
+        for key in {str(path), os.path.realpath(path)}:
+            if projects.get(key, {}).get("hasTrustDialogAccepted"):
+                report("ok", f"folder is trusted in Claude Code ({key})")
+                return True
+    report("FAIL", "this folder isn't trusted in Claude Code, so the agents' guard hooks won't run. "
+                   "Open `claude` here once and accept the trust prompt")
+    return False
+
+
+def check_mcp():
+    """MCP servers give the orchestrator, the one session the guard doesn't cover, tools beyond the
+    shell, and the agent text it reads could steer it into using them. The agents can't: their
+    files list their tools. Plugins and claude.ai connectors aren't visible from here."""
+    names = set()
+    try:
+        data = json.loads(claude_config_file().read_text())
+    except (OSError, ValueError):
+        data = {}
+    here = Path(os.path.realpath(REPO))
+    projects = data.get("projects") or {}
+    for scope in (data, projects.get(str(here)) or {}):  # user scope, then this folder's local scope
+        names.update(scope.get("mcpServers") or {})
+    try:
+        names.update(json.loads((here / ".mcp.json").read_text()).get("mcpServers") or {})
+    except (OSError, ValueError):
+        pass
+    if names:
+        shown = ", ".join(sorted(re.sub(r"[^\w.@-]", "", n)[:40] or "?" for n in names))
+        report("warn", f"MCP servers configured ({shown}); the orchestrator session could use them. Start "
+                       "/factory runs with `claude --strict-mcp-config` and check /mcp lists none")
+    else:
+        report("ok", "no MCP servers in Claude Code's config or .mcp.json; check /mcp for plugins and connectors")
+
+
+def check_ci_wait(cfg):
+    """An unattended merge waits for the repository's CI; naming the checks makes the wait exact."""
+    if not cfg.get("auto_merge", {}).get("enabled"):
+        return
+    workflows = list((REPO / ".github" / "workflows").glob("*.y*ml"))
+    if workflows and not cfg.get("ci", {}).get("required_checks"):
+        report("warn", "auto_merge waits only for the CI checks that appear within ci.grace_seconds of a push; "
+                       "list your CI's check names in ci.required_checks so a slow workflow can't be missed")
+
+
+def check_audit(cfg):
+    """The audit log's hash chain is intact; `job audit` shows where it breaks."""
+    count, problem = audit.Log(FACTORY / "jobs" / "audit", cfg).verify()
+    if problem:
+        report("FAIL", f"audit log: {problem}. Stop and find out who changed it (RUNBOOK.md, Suspected compromise)")
+    else:
+        report("ok", f"audit log: {count} records, chain intact" if count else "audit log: empty until the first job")
+
+
+def check_app(cfg, offline):
+    """With github_app set up: the private key is in place, outside the repository and private, and
+    (online) GitHub issues a token. Returns the token for the checks that follow, or None."""
+    if not github_app.configured(cfg):
+        return None  # optional: without an App the scripts use your gh login, which check_token checks
+    app, key = cfg["github_app"], github_app.key_path(cfg)
+    label = f"GitHub App {app['app_id']}"
+    if not key.is_file():
+        report("FAIL", f"{label}: the private key {key} doesn't exist (github_app.private_key)")
+        return None
+    if Path(os.path.realpath(key)).is_relative_to(os.path.realpath(REPO)):
+        report("FAIL", f"{label}: the private key is inside the repository ({key}); move it out of the "
+                       "repository and point github_app.private_key at it")
+        return None
+    if key.stat().st_mode & 0o077:
+        report("FAIL", f"{label}: the private key {key} is readable by other users; run chmod 600 on it")
+        return None
+    if offline:
+        report("ok", f"{label}: private key in place; the token isn't checked offline")
+        return None
+    try:
+        reply = github_app.mint(cfg, REPO)
+    except github_app.AppError as e:
+        report("FAIL", f"{label}: {e}")
+        return None
+    perms = ", ".join(f"{k} {v}" for k, v in sorted((reply.get("permissions") or {}).items()))
+    repos = ", ".join(r.get("name", "?") for r in reply.get("repositories") or []) or "the installation's repositories"
+    report("ok", f"{label}: installation {app['installation_id']} issued a one-hour token for {repos} ({perms})")
+    return reply["token"]
+
+
+def check_github(cfg, app_token=None):
+    git = ["git"]
+    if github_app.configured(cfg):
+        if not app_token:
+            return  # check_app said why
+        # The rest of the checks run as the factory's scripts do: with the App's token.
+        os.environ["GH_TOKEN"] = os.environ["FACTORY_GIT_TOKEN"] = app_token
+        git += github_app.git_options(FACTORY / "bin" / "git-credential-app")
+    else:
+        if sh("gh", "auth", "status").returncode != 0:
+            report("FAIL", "gh isn't authenticated; use a fine-grained token limited to this repository")
+            return
+        report("ok", "gh is authenticated")
+        check_token()
+    base = cfg.get("base_branch", "main")
+    if sh(*git, "ls-remote", "--exit-code", "--heads", "origin", base).returncode != 0:
+        report("FAIL", f"origin has no branch {base!r} (base_branch)")
+    labels = sh("gh", "label", "list", "--limit", "200", "--json", "name")
+    if labels.returncode == 0:
+        have = {l["name"] for l in json.loads(labels.stdout)}
+        missing = [v for v in cfg.get("labels", {}).values() if v not in have]
+        report("FAIL" if missing else "ok",
+               f"labels missing on GitHub: {', '.join(missing)}" if missing else "GitHub labels exist")
+    protection = sh("gh", "api", f"repos/{{owner}}/{{repo}}/branches/{base}/protection")
+    if protection.returncode == 0:
+        report("ok", f"{base} has branch protection")
+    else:
+        level = "FAIL" if cfg.get("auto_merge", {}).get("enabled") else "warn"
+        if "Upgrade to GitHub Pro" in (protection.stderr or ""):
+            report(level, f"{base} can't have branch protection: GitHub Free doesn't offer it for private "
+                          "repositories (GitHub Pro or Team does). Nothing on GitHub stops a direct push or an "
+                          "unreviewed merge, so keep auto_merge off and review every factory PR")
+        else:
+            report(level, f"{base} has no branch protection (or the token can't read it); "
+                          "require PR reviews and status checks before trusting any merge")
+
+
+def main(argv):
+    offline = argv == ["--offline"]
+    if argv and not offline:
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(2)
+    cfg = check_config()
+    check_policy()
+    check_trust()
+    check_mcp()
+    if cfg is not None:
+        check_files(cfg)
+        check_ci_wait(cfg)
+        check_audit(cfg)
+        app_token = check_app(cfg, offline)
+        if not offline:
+            check_github(cfg, app_token)
+    fails = results.count("FAIL")
+    print(f"\n{fails} failing, {results.count('warn')} warnings")
+    sys.exit(1 if fails else 0)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

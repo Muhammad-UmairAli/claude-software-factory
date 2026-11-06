@@ -1,0 +1,66 @@
+Software Factory for Claude Code
+================================
+
+This software is a modified version of an open-source work licensed under
+the GNU General Public License, version 3 (see LICENSE). This modified version
+is distributed under the same license.
+Under section 5 of the GPL, anyone who conveys this work or a version based on
+it must keep this notice and the license, and must release their version under
+the GPL as well.
+
+Modified 2026-11-05. Summary of changes from the original:
+
+- Merge policy: auto-merge is off by default; approved PRs are handed to a
+  human (label factory:approved). When enabled, auto-merge is capped by risk
+  and merges only the exact gated commit (--match-head-commit).
+- Script-enforced escalation: changes to CI, infrastructure, dependency
+  manifests, migrations and agent instructions always go to a human.
+- New factory/bin/guard: a PreToolUse hook on every agent that checks file
+  writes per role and blocks common forms of secret reads, GitHub writes,
+  unsafe pushes and writes into the factory itself; read-only roles get an
+  allowlisted shell.
+- Draft PRs are opened by factory/bin/job instead of the builder, so no
+  LLM-written title passes through a shell.
+- The gate runs checks.sh with a scrubbed environment and a time limit, and
+  protected paths now include added files and the factory's own files.
+- Issue authors must have triage or write access by default.
+- Per-job cost ceiling, per-job audit trail (events.jsonl), single global lock
+  (removes a deadlock), cost accounting that can't block state changes,
+  corrected prices, models governed from config.json.
+- New factory/bin/doctor preflight, a unit and pipeline test suite, a hardened
+  dashboard (Content-Security-Policy, localhost-only instructions).
+- Lite and full profiles chosen by risk; intake works to a size budget and
+  writes acceptance criteria; the gate records each change's size; a
+  benchmark protocol and `job metrics` CSV export.
+- Fail-closed check that the agents' guard hooks actually ran, and preflight
+  checks for folder trust and organization hook policy.
+- Documentation rewritten; promotional material, marketing links, images and
+  third-party usernames removed.
+
+Further modified 2026-11-06:
+
+- The guard parses shell commands the way bash does and ties every write to a
+  job in the agent's own stage; an adversarial regression corpus covers it.
+- A control-file seal: job commands and the gate refuse after the factory's
+  own files, git config or git hooks change mid-run.
+- Text bound for GitHub is filtered for credentials and images and capped.
+- The preflight fails on a GitHub token with the classic `repo` scope and
+  explains which risks auto-merge covers.
+- Dependency changes wait for a human before any check runs them; jobs can be
+  cancelled and the factory paused; retried steps don't post twice.
+- Reviewers and the approver get a read-only shell; the orchestrator reads job
+  files through a filter that frames them as data.
+- CI, tests for every job transition, a runbook, a security policy and a
+  changelog; the builder's stop hook is removed and transcript costs are
+  cached.
+
+Further modified 2026-11-07:
+
+- The gate's verdict is posted as a commit status, and unattended merges wait
+  for the repository's CI.
+- Routing follows the diff: sensitive paths add the security review.
+- Optional GitHub App identity with short-lived tokens.
+- A runtime container with an egress firewall; the factory pushes, agents
+  don't.
+- A hash-chained audit log, and a pilot kit.
+

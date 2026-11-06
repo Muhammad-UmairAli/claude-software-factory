@@ -1,0 +1,294 @@
+#!/usr/bin/env python3
+"""Install the software factory into a project.
+
+Usage:
+  ./install <project> [--dry-run] [--create-labels]
+
+Run it from a copy of this repository. It checks the project, copies the
+factory's files in, drafts factory/checks.sh from the project's own toolchain
+files, sets base_branch, adds the two .gitignore lines and the AGENTS.md (or
+CLAUDE.md) section, then runs `factory/bin/doctor --offline` there. It never
+overwrites a file and never commits: you review the change and merge it
+through the project's normal review.
+
+  --dry-run         print what it would do and change nothing
+  --create-labels   also create the factory's GitHub labels with gh (a write
+                    to the project's repository); by default it prints the
+                    commands
+
+It refuses a folder that isn't the root of a git repository, a repository with
+uncommitted changes, one without an origin, and any file the factory would
+overwrite. The parts that need judgment stay with you: read the drafted
+checks.sh, tailor the reviewers' checklists, and decide on Claude Code
+settings (INSTALL.md, step 2).
+"""
+
+import json
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+
+# Copied unchanged. factory/checks.sh is written for the project instead, and LICENSE and NOTICE
+# go to factory/ so the license and attribution travel with the files. Keep INSTALL.md's list in step.
+MANIFEST = [
+    ".claude/skills/factory/SKILL.md",
+    ".claude/agents/intake.md",
+    ".claude/agents/spec-writer.md",
+    ".claude/agents/builder.md",
+    ".claude/agents/reviewer-code.md",
+    ".claude/agents/reviewer-security.md",
+    ".claude/agents/reviewer-ux.md",
+    ".claude/agents/reviewer-ui.md",
+    ".claude/agents/approver.md",
+    "factory/config.json",
+    "factory/bin/job",
+    "factory/bin/gate",
+    "factory/bin/route",
+    "factory/bin/guard",
+    "factory/bin/doctor",
+    "factory/bin/git-credential-app",
+    "factory/bin/runtime",
+    "factory/lib/github_app.py",
+    "factory/lib/audit.py",
+    "factory/runtime/Dockerfile",
+    "factory/runtime/entrypoint.sh",
+    "factory/runtime/init-firewall.sh",
+    "factory/runtime/egress-allowlist",
+    "factory/dashboard.html",
+]
+EXTRA = {"LICENSE": "factory/LICENSE", "NOTICE": "factory/NOTICE"}
+EXECUTABLE = ("factory/bin/", "factory/runtime/entrypoint.sh", "factory/runtime/init-firewall.sh")
+
+GITIGNORE = ["/factory/jobs/", "/.worktrees/"]
+
+PROJECT_SECTION = """
+## Software factory
+
+`/factory run` builds every open GitHub issue labeled `factory` through
+intake → spec → build → gate → review → approve, one PR per issue; a human
+merges unless `auto_merge` allows it. State is in `factory/jobs/`
+(gitignored); `factory/bin/job` is its only writer. Checks:
+`factory/checks.sh`. Preflight: `factory/bin/doctor`. Dashboard:
+`cd factory && python3 -m http.server --bind 127.0.0.1 8000`, then open
+http://127.0.0.1:8000/dashboard.html.
+
+Each job works in its own git worktree, a full checkout of the repo at
+`.worktrees/<job-id>` (gitignored). A tool run from the repo root that doesn't
+read `.gitignore` sees those copies too; exclude `.worktrees/` in its config.
+"""
+
+LABELS = [
+    ("factory", "5319E7", "Build this with the software factory"),
+    ("factory:needs-info", "FBCA04", "The factory asked the author a question"),
+    ("factory:needs-human", "D93F0B", "The factory needs a human decision on the PR"),
+    ("factory:approved", "0E8A16", "The factory approved this PR; a human merges it"),
+]
+
+
+def die(msg):
+    print(f"install: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def git(project, *args, check=True):
+    res = subprocess.run(["git", *args], cwd=project, capture_output=True, text=True)
+    if check and res.returncode != 0:
+        die(f"`git {' '.join(args)}` failed in {project}: {res.stderr.strip()}")
+    return res
+
+
+def check_project(project):
+    """The project's base branch, after the checks that make an install safe to review and undo."""
+    if not project.is_dir():
+        die(f"{project} isn't a folder")
+    top = git(project, "rev-parse", "--show-toplevel", check=False)
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != project.resolve():
+        die(f"{project} isn't the root of a git repository; point at the folder that holds .git")
+    dirty = git(project, "status", "--porcelain", "--untracked-files=all").stdout
+    if dirty.strip():
+        die("the project has uncommitted changes; commit or stash them first, so the install is a clean diff:\n"
+            + dirty.rstrip())
+    origin = git(project, "remote", "get-url", "origin", check=False)
+    if origin.returncode != 0:
+        die("the project has no `origin` remote; the factory works through a GitHub repository")
+    if "github.com" not in origin.stdout:
+        print(f"note: origin ({origin.stdout.strip()}) isn't on github.com; the factory talks to GitHub through gh")
+    clashes = [rel for rel in MANIFEST + list(EXTRA.values()) + ["factory/checks.sh"] if (project / rel).exists()]
+    if clashes:
+        die("these files already exist, and the installer never overwrites:\n  " + "\n  ".join(clashes)
+            + "\nIf the factory is already installed, update it by hand (INSTALL.md) for now.")
+    return base_branch(project)
+
+
+def base_branch(project):
+    """origin's default branch, read from the remote itself, else the current branch."""
+    res = git(project, "ls-remote", "--symref", "origin", "HEAD", check=False)
+    m = re.search(r"^ref: refs/heads/(\S+)\tHEAD", res.stdout, re.M) if res.returncode == 0 else None
+    if m:
+        return m.group(1)
+    current = git(project, "branch", "--show-current").stdout.strip() or "main"
+    print(f"note: couldn't read origin's default branch; using {current}")
+    return current
+
+
+def detect_checks(project):
+    """(commands, sources): a first draft of the project's checks, from the files that declare them."""
+    p, cmds, sources = Path(project), [], []
+    pkg = p / "package.json"
+    if pkg.exists():
+        try:
+            scripts = json.loads(pkg.read_text()).get("scripts") or {}
+        except ValueError:
+            scripts = {}
+        if (p / "pnpm-lock.yaml").exists():
+            pm, install = "pnpm", "pnpm install --frozen-lockfile"
+        elif (p / "yarn.lock").exists():
+            pm, install = "yarn", "yarn install --frozen-lockfile"
+        elif (p / "bun.lockb").exists() or (p / "bun.lock").exists():
+            pm, install = "bun", "bun install --frozen-lockfile"
+        elif (p / "package-lock.json").exists():
+            pm, install = "npm", "npm ci"
+        else:
+            pm, install = "npm", "npm install"
+        cmds.append(install)
+        for name in ("lint", "typecheck", "type-check", "test", "build"):
+            if name in scripts:
+                cmds.append("npm test" if (pm, name) == ("npm", "test") else f"{pm} run {name}")
+        sources.append("package.json")
+    pyproject = p / "pyproject.toml"
+    py_text = pyproject.read_text() if pyproject.exists() else ""
+    if pyproject.exists() or (p / "requirements.txt").exists():
+        # A virtualenv outside the worktree: the gate needs a clean tree, and .venv may not be ignored.
+        cmds.append('venv="${TMPDIR:-/tmp}/factory-venv-$(basename "$PWD")"')
+        cmds.append('python3 -m venv "$venv"')
+        if (p / "requirements.txt").exists():
+            cmds.append('"$venv/bin/python" -m pip install --quiet -r requirements.txt')
+        if "[tool.ruff" in py_text:
+            cmds.append('"$venv/bin/python" -m pip install --quiet ruff')
+            cmds.append('"$venv/bin/python" -m ruff check .')
+        if "[tool.pytest" in py_text or (p / "pytest.ini").exists() or (p / "tests").is_dir():
+            cmds.append('"$venv/bin/python" -m pip install --quiet pytest')
+            cmds.append('"$venv/bin/python" -m pytest -q')
+        sources.append("pyproject.toml" if pyproject.exists() else "requirements.txt")
+    if (p / "go.mod").exists():
+        cmds += ["go vet ./...", "go test ./..."]
+        sources.append("go.mod")
+    if (p / "Cargo.toml").exists():
+        cmds.append("cargo test --locked")
+        sources.append("Cargo.toml")
+    makefile = p / "Makefile"
+    if not cmds and makefile.exists() and re.search(r"^test\s*:", makefile.read_text(), re.M):
+        cmds.append("make test")
+        sources.append("Makefile")
+    return cmds, sources
+
+
+def checks_script(cmds, sources):
+    header = ("#!/usr/bin/env bash\n"
+              "# The project's checks. The gate runs this in each job's worktree, with a scrubbed\n"
+              "# environment and a time limit; a job passes only if it exits 0. It must not\n"
+              "# rewrite tracked files (no --fix, no snapshot updates).\n")
+    if not cmds:
+        return (header + "#\n# The installer found no test setup it knows (package.json, pyproject.toml,\n"
+                "# requirements.txt, go.mod, Cargo.toml, a Makefile test target). Until you replace\n"
+                "# this, every job fails at the gate.\nset -euo pipefail\n"
+                "echo \"factory/checks.sh: add the project's lint, test and build commands\" >&2\nexit 1\n")
+    return (header + f"#\n# Drafted by the installer from {', '.join(sources)}. Read it, run it once from the\n"
+            "# project root (bash factory/checks.sh), and add anything the project's CI checks too.\n"
+            "set -euo pipefail\nexport CI=true\n\n" + "\n".join(cmds) + "\n")
+
+
+def instructions_file(project):
+    """AGENTS.md, or CLAUDE.md when only that exists: the file every agent reads."""
+    if (project / "AGENTS.md").exists() or not (project / "CLAUDE.md").exists():
+        return project / "AGENTS.md"
+    return project / "CLAUDE.md"
+
+
+def label_commands():
+    return [["gh", "label", "create", name, "--color", color, "--description", desc, "--force"]
+            for name, color, desc in LABELS]
+
+
+def main(argv):
+    args = [a for a in argv if not a.startswith("--")]
+    flags = {a for a in argv if a.startswith("--")}
+    if len(args) != 1 or flags - {"--dry-run", "--create-labels"}:
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(2)
+    if sys.version_info < (3, 10):
+        die("the factory needs Python 3.10 or later")
+    project = Path(args[0]).expanduser().resolve()
+    dry = "--dry-run" in flags
+    base = check_project(project)
+    cmds, sources = detect_checks(project)
+    script = checks_script(cmds, sources)
+    notes = instructions_file(project)
+    ignored = [line for line in GITIGNORE
+               if git(project, "check-ignore", "-q", line.strip("/") + "x", check=False).returncode != 0]
+
+    print(f"Installing the software factory into {project} (base branch {base})")
+    print("\nCopy:\n  " + "\n  ".join(MANIFEST + [f"{src} -> {dst}" for src, dst in EXTRA.items()]))
+    print("\nWrite factory/checks.sh:\n  " + script.rstrip().replace("\n", "\n  "))
+    print(f"\nSet base_branch to {base} in factory/config.json")
+    if ignored:
+        print(f"Add to .gitignore: {', '.join(ignored)}")
+    if "## Software factory" not in (notes.read_text() if notes.exists() else ""):
+        print(f"Add the '## Software factory' section to {notes.name}")
+    if dry:
+        print("\nDry run: nothing was changed.")
+        return
+
+    for rel in MANIFEST:
+        dst = project / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / rel, dst)
+    for src, dst in EXTRA.items():
+        shutil.copy2(ROOT / src, project / dst)
+    (project / "factory/checks.sh").write_text(script)
+    for path in [project / rel for rel in MANIFEST if rel.startswith(EXECUTABLE)] + [project / "factory/checks.sh"]:
+        path.chmod(0o755)
+    cfg_path = project / "factory/config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["base_branch"] = base
+    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+    if ignored:
+        gi = project / ".gitignore"
+        text = gi.read_text() if gi.exists() else ""
+        gi.write_text(text + ("" if not text or text.endswith("\n") else "\n") + "\n".join(ignored) + "\n")
+    text = notes.read_text() if notes.exists() else ""
+    if "## Software factory" not in text:
+        notes.write_text(text + ("" if not text or text.endswith("\n") else "\n") + PROJECT_SECTION)
+
+    if "--create-labels" in flags:
+        for cmd in label_commands():
+            res = subprocess.run(cmd, cwd=project, capture_output=True, text=True)
+            print(f"{'created' if res.returncode == 0 else 'FAILED '} label {cmd[3]}"
+                  + ("" if res.returncode == 0 else f": {res.stderr.strip()}"))
+    else:
+        print("\nCreate the labels on GitHub (or rerun with --create-labels):")
+        for cmd in label_commands():
+            print("  " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
+
+    print("\nPreflight (factory/bin/doctor --offline):")
+    doctor = subprocess.run([str(project / "factory/bin/doctor"), "--offline"], cwd=project,
+                            capture_output=True, text=True)
+    print("  " + (doctor.stdout + doctor.stderr).strip().replace("\n", "\n  "))
+
+    print(f"""
+Installed. Nothing is committed. Next:
+  1. Read factory/checks.sh and run it once: cd {project} && bash factory/checks.sh
+  2. Tailor the reviewers' checklists and decide on Claude Code settings (INSTALL.md, step 2).
+  3. Commit on a branch and merge through review: the factory branches every job from
+     origin/{base}, so the install must be there before the first run.
+  4. Use a fine-grained GitHub token for this repository only (RUNBOOK.md, GitHub credentials).
+  5. Build the runtime container (factory/bin/runtime build), start it (factory/bin/runtime shell),
+     open claude there, accept the folder trust prompt, run factory/bin/doctor, then /factory run.""")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

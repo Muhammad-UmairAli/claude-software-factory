@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Map intake's risk and surfaces to the job's agent set.
+
+Usage: route <job-id>
+
+Reads `risk` and `surfaces` from intake.md (through job.json), looks them up in
+config.json's `routing` and `surface_reviewers` tables, picks the profile
+(lite or full) from `profiles`, adds the per-role models from `models`, and
+records the result in job.json with `job agents`.
+Prints the agent set. The orchestrator passes these models to the Agent tool,
+which overrides each agent file's `model` frontmatter, so cost is governed
+from config.json alone.
+"""
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+FACTORY = Path(__file__).resolve().parents[1]
+CONFIG = json.loads((FACTORY / "config.json").read_text())
+
+
+def die(msg):
+    print(f"route: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def agent_set(intake):
+    """{"profile": ..., "models": {...}, "reviewers": {...}} for an intake's risk and surfaces."""
+    risk = CONFIG["routing"].get(intake["risk"]) or die(
+        f"risk {intake['risk']!r} isn't in config.json routing ({', '.join(CONFIG['routing'])})")
+    reviewers = dict(risk)
+    for surface in intake["surfaces"]:
+        extra = CONFIG["surface_reviewers"].get(surface)
+        if extra is None:
+            die(f"surface {surface!r} isn't in config.json surface_reviewers ({', '.join(CONFIG['surface_reviewers'])})")
+        for name, model in extra.items():
+            # A surface never downgrades a reviewer the risk level already chose.
+            reviewers.setdefault(name, model)
+    for name in reviewers:
+        if not (FACTORY.parent / ".claude" / "agents" / f"reviewer-{name}.md").exists():
+            die(f"no agent file .claude/agents/reviewer-{name}.md for routed reviewer {name!r}")
+    profile = CONFIG.get("profiles", {}).get(intake["risk"], "full")
+    if profile not in {"lite", "full"}:
+        die(f"profile {profile!r} for risk {intake['risk']!r} isn't lite or full")
+    return {"profile": profile, "models": dict(CONFIG.get("models", {})), "reviewers": reviewers}
+
+
+def main(argv):
+    if len(argv) != 1:
+        die("usage: route <job-id>")
+    job_id = argv[0]
+    job_bin = str(FACTORY / "bin" / "job")
+    res = subprocess.run([job_bin, "sync", job_id], capture_output=True, text=True)
+    if res.returncode != 0:
+        die(res.stderr.strip())
+    job = json.loads((FACTORY / "jobs" / job_id / "job.json").read_text())
+    intake = job["intake"] or die(f"{job_id} has no intake.md")
+    agents = agent_set(intake)
+    res = subprocess.run([job_bin, "agents", job_id, json.dumps(agents)], capture_output=True, text=True)
+    if res.returncode != 0:
+        die(res.stderr.strip())
+    print(f"{job_id}: {agents['profile']} profile; reviewers "
+          + ", ".join(f"{k} {v}" for k, v in agents["reviewers"].items()))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

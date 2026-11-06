@@ -1,0 +1,10 @@
+# Hosts the factory's runtime container may reach over HTTPS, one per line.
+# Text after the host name is a comment. GitHub's own web, API and git ranges
+# are always allowed (from api.github.com/meta). Changes need a rebuild
+# (factory/bin/runtime build); this file is a protected path and sealed.
+api.anthropic.com         Claude API
+console.anthropic.com     Claude Code sign-in
+claude.ai                 Claude Code sign-in with a Claude subscription
+registry.npmjs.org        npm installs from checks.sh; delete it if the project has none
+pypi.org                  pip installs from checks.sh; delete it if the project has none
+files.pythonhosted.org    pip downloads

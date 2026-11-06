@@ -1,0 +1,2 @@
+# Development only: CI lint. The factory itself needs nothing beyond the standard library.
+pyflakes==4.1.0

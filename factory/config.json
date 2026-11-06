@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "concurrency": 1,
+  "max_rounds": 3,
+  "max_cost_usd_per_job": 20,
+  "base_branch": "main",
+  "merge_method": "merge",
+  "auto_merge": {
+    "enabled": false,
+    "max_risk": "low"
+  },
+  "sensitive_paths": [
+    "*auth*", "*login*", "*logout*", "*signin*", "*sign-in*", "*signup*", "*sign-up*",
+    "*session*", "*password*", "*passwd*", "*credential*", "*saml*", "*oidc*", "*jwt*", "*token*",
+    "*permission*", "*rbac*", "*access-control*", "*access_control*", "*role*", "*admin*",
+    "*security*", "*policy*", "*policies*", "*.rules", "*secret*", "*crypt*", "*cipher*",
+    "*.pem", "*.key", "*csrf*", "*cors*", "*sanitiz*", "*webhook*",
+    "*payment*", "*billing*", "*invoice*", "*checkout*", "*stripe*", "*paypal*", "*subscription*",
+    "*refund*"
+  ],
+  "ci": {
+    "required_checks": [],
+    "wait_minutes": 30,
+    "grace_seconds": 60,
+    "poll_seconds": 15
+  },
+  "audit": {
+    "max_mb": 10,
+    "keep_days": 365,
+    "forward_url": null,
+    "forward_token_env": "FACTORY_AUDIT_TOKEN"
+  },
+  "github_app": {
+    "app_id": null,
+    "installation_id": null,
+    "private_key": "~/.config/software-factory/github-app.pem"
+  },
+  "issue_authors": "collaborators",
+  "profiles": { "low": "lite", "medium": "full", "high": "full" },
+  "sizing": { "max_files": 8, "max_changed_lines": 400 },
+  "checks": {
+    "timeout_sec": 1800,
+    "env_allowlist": [
+      "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+      "TERM", "TMPDIR", "TZ",
+      "JAVA_HOME", "GOPATH", "GOROOT", "CARGO_HOME", "RUSTUP_HOME",
+      "NVM_DIR", "PYENV_ROOT", "VIRTUAL_ENV", "DOTNET_ROOT"
+    ]
+  },
+  "labels": {
+    "queue": "factory",
+    "needs_info": "factory:needs-info",
+    "needs_human": "factory:needs-human",
+    "approved": "factory:approved"
+  },
+  "models": {
+    "intake": "opus",
+    "spec": "opus",
+    "builder": "opus",
+    "approver": "opus"
+  },
+  "routing": {
+    "low":    { "code": "haiku" },
+    "medium": { "code": "sonnet" },
+    "high":   { "code": "sonnet", "security": "opus" }
+  },
+  "surface_reviewers": {
+    "ui": { "ux": "sonnet", "ui": "haiku" },
+    "security": { "security": "opus" }
+  },
+  "protected_paths": [
+    "factory/*",
+    ".claude/agents/*",
+    ".claude/skills/factory/*",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".codex/*",
+    ".agents/*",
+    ".git/*"
+  ],
+  "hold_paths": [
+    "package.json", "*/package.json", "package-lock.json", "*/package-lock.json", "npm-shrinkwrap.json",
+    "pnpm-lock.yaml", "*/pnpm-lock.yaml", "pnpm-workspace.yaml", "yarn.lock", "*/yarn.lock",
+    ".npmrc", "*/.npmrc", ".yarnrc", ".yarnrc.yml", "bunfig.toml", "bun.lockb",
+    "requirements*.txt", "*/requirements*.txt", "constraints*.txt", "pyproject.toml", "*/pyproject.toml",
+    "setup.py", "setup.cfg", "poetry.lock", "uv.lock", "Pipfile", "Pipfile.lock", "pip.conf",
+    "go.mod", "go.sum", "Cargo.toml", "*/Cargo.toml", "Cargo.lock", ".cargo/config*",
+    "Gemfile", "Gemfile.lock", "*.gemspec", "composer.json", "composer.lock",
+    "*.csproj", "*.fsproj", "packages.config", "Directory.Packages.props", "Directory.Build.props",
+    "nuget.config", "NuGet.Config",
+    "pom.xml", "*/pom.xml", "build.gradle", "build.gradle.kts", "*/build.gradle", "*/build.gradle.kts",
+    "settings.gradle", "settings.gradle.kts", "gradle.properties", "gradle/wrapper/*"
+  ],
+  "escalate_paths": [
+    ".claude/*",
+    ".codex/*",
+    ".agents/*",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".github/*",
+    ".mcp.json", ".vscode/*", ".devcontainer/*", ".pre-commit-config.yaml", ".husky/*",
+    "lefthook.yml", ".lefthook.yml",
+    ".npmrc", "*/.npmrc", ".yarnrc", ".yarnrc.yml", "pip.conf", "bunfig.toml", ".cargo/config*",
+    ".gitlab-ci.yml",
+    "azure-pipelines*.yml",
+    "Dockerfile*", "*/Dockerfile*", "docker-compose*.yml", "*/docker-compose*.yml",
+    "*.tf", "*.tfvars", "*.bicep", "infra/*", "deploy/*", "k8s/*", "helm/*",
+    "migrations/*", "*/migrations/*",
+    "package.json", "*/package.json", "package-lock.json", "*/package-lock.json",
+    "pnpm-lock.yaml", "*/pnpm-lock.yaml", "yarn.lock", "*/yarn.lock",
+    "requirements*.txt", "*/requirements*.txt", "pyproject.toml", "*/pyproject.toml",
+    "poetry.lock", "uv.lock", "Pipfile", "Pipfile.lock",
+    "go.mod", "go.sum", "Cargo.toml", "Cargo.lock", "Gemfile", "Gemfile.lock",
+    "*.csproj", "*.sln", "packages.config", "Directory.Packages.props", "nuget.config",
+    "pom.xml", "build.gradle", "build.gradle.kts", "*/build.gradle", "*/build.gradle.kts",
+    ".env.example", "*.pem", "*.key"
+  ],
+  "ports": { "base": 5100, "step": 10 },
+  "prices_usd_per_mtok": {
+    "claude-fable-5-1":  { "input": 10.0, "output": 50.0, "cache_write_5m": 12.5, "cache_write_1h": 20.0, "cache_read": 0.25 },
+    "claude-opus-5-5":   { "input": 4.0,  "output": 20.0, "cache_write_5m": 5.0,  "cache_write_1h": 8.0,  "cache_read": 0.20 },
+    "claude-sonnet-5-5": { "input": 2.0,  "output": 10.0, "cache_write_5m": 2.5,  "cache_write_1h": 4.0,  "cache_read": 0.10 },
+    "claude-haiku-5-5":  { "input": 0.10, "output": 0.50, "cache_write_5m": 0.125, "cache_write_1h": 0.20, "cache_read": 0.01,
+                           "long_prompt": { "over_tokens": 100000, "input": 0.50, "output": 2.50, "cache_write_5m": 0.625, "cache_write_1h": 1.0, "cache_read": 0.05 } }
+  },
+  "prices_checked": "2026-11-05, https://platform.claude.com/docs/en/about-claude/pricing"
+}

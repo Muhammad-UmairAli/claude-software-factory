@@ -1,0 +1,5 @@
+# The repository owner reviews every change to the factory: its scripts and
+# config, the agents and skill, the tests and the docs. Add a second reviewer
+# here before turning on "Require review from Code Owners" in a ruleset; with
+# one owner, that rule would block the owner's own pull requests.
+* @Muhammad-UmairAli

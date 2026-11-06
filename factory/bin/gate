@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""The deterministic gate: does the job's branch pass the repo's checks?
+
+Usage:
+  gate <job-id>            write round-N/checks.md; exit 0 on PASS, 1 on FAIL, 3 on HOLD
+  gate <job-id> --merge    same, as round-N/merge-checks.md (job merge runs it)
+
+The gate runs the main checkout's factory/checks.sh inside the job's worktree,
+so a branch can't change the checks it is judged by, and refuses to run at all
+when the control files changed since `job seal`. It also fails when the
+branch adds, modifies, renames or deletes a file matching config.json
+`protected_paths` (fnmatch patterns, where `*` also matches `/`).
+
+checks.sh runs branch code written by an agent from issue text, so it gets a
+scrubbed environment (only `checks.env_allowlist` passes through, which keeps
+tokens such as GH_TOKEN or cloud credentials out of reach) and a time limit
+(`checks.timeout_sec`). Neither is a sandbox: see DESIGN.md, "Security model".
+"""
+
+import fnmatch
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+FACTORY = REPO / "factory"
+CONFIG = json.loads((FACTORY / "config.json").read_text())
+CHECKS = FACTORY / "checks.sh"
+CHECKS_CFG = CONFIG.get("checks", {})
+TIMEOUT = int(CHECKS_CFG.get("timeout_sec", 1800))
+ENV_ALLOWLIST = CHECKS_CFG.get("env_allowlist")  # None passes the whole environment
+JOB_ID = re.compile(r"\d{3,}-[a-z0-9-]+")
+TAIL = 80
+HOLD_EXIT = 3  # held for a human: the branch changes dependency or package-manager files
+
+
+def die(msg):
+    print(f"gate: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def git(worktree, *args):
+    res = subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
+    if res.returncode != 0:
+        die(f"`git {' '.join(args)}` failed: {res.stderr.strip()}")
+    return res.stdout
+
+
+def load_job(job_id):
+    if not JOB_ID.fullmatch(job_id or ""):
+        die(f"{job_id!r} isn't a job id")
+    return json.loads((FACTORY / "jobs" / job_id / "job.json").read_text())
+
+
+def protected_changes(worktree):
+    """Paths under protected_paths that the branch added, modified, renamed or deleted.
+
+    Added files count: a new .claude/settings.local.json or factory/bin/ script
+    is as dangerous as an edited one."""
+    diff = git(worktree, "diff", "--name-status", f"origin/{CONFIG['base_branch']}...HEAD")
+    hits = []
+    for line in diff.splitlines():
+        status, *paths = line.split("\t")
+        for path in paths:  # for renames and copies, both the old and the new path
+            if any(fnmatch.fnmatch(path, pattern) for pattern in CONFIG["protected_paths"]):
+                hits.append(f"{status[0]} {path}")
+                break
+    return hits
+
+
+def blob(worktree, path):
+    """The git object id of path at HEAD, or "deleted"."""
+    res = subprocess.run(["git", "rev-parse", f"HEAD:{path}"], cwd=worktree, capture_output=True, text=True)
+    return res.stdout.strip() if res.returncode == 0 else "deleted"
+
+
+def held_changes(worktree, job_id):
+    """Changed paths under config.json `hold_paths` (dependency manifests, lockfiles, package-manager
+    configs) that a human hasn't approved at their current content. Installing them runs code that
+    nobody has reviewed yet, so the gate runs no checks while any are held. `job allow` records an
+    approval as the file's git object id, so any later change to the file is held again."""
+    patterns = CONFIG.get("hold_paths", [])
+    try:
+        allowed = json.loads((FACTORY / "jobs" / job_id / "allowed-paths.json").read_text())
+    except (OSError, ValueError):
+        allowed = {}
+    diff = git(worktree, "diff", "--name-status", f"origin/{CONFIG['base_branch']}...HEAD")
+    held = set()
+    for line in diff.splitlines():
+        for path in line.split("\t")[1:]:
+            if any(fnmatch.fnmatch(path, p) for p in patterns) and allowed.get(path) != blob(worktree, path):
+                held.add(path)
+    return sorted(held)
+
+
+def diff_size(worktree):
+    """(files, insertions, deletions) the branch changed against the base. Binary files count as files."""
+    out = git(worktree, "diff", "--numstat", f"origin/{CONFIG['base_branch']}...HEAD")
+    files = adds = dels = 0
+    for line in out.splitlines():
+        added, deleted, _ = line.split("\t", 2)
+        files += 1
+        if added != "-":
+            adds, dels = adds + int(added), dels + int(deleted)
+    return files, adds, dels
+
+
+def size_note(files, adds, dels):
+    """Why the change is over config.json `sizing`, or "". Reported, not failed: the approver judges it."""
+    sizing = CONFIG.get("sizing") or {}
+    over = []
+    if sizing.get("max_files") and files > sizing["max_files"]:
+        over.append(f"{files} files > {sizing['max_files']}")
+    if sizing.get("max_changed_lines") and adds + dels > sizing["max_changed_lines"]:
+        over.append(f"{adds + dels} changed lines > {sizing['max_changed_lines']}")
+    return f"over the sizing budget ({'; '.join(over)})" if over else ""
+
+
+def checks_env():
+    if ENV_ALLOWLIST is None:
+        return None
+    env = {k: v for k, v in os.environ.items() if k in ENV_ALLOWLIST}
+    env["CI"] = "true"  # most tools then skip prompts, watch modes and colours
+    return env
+
+
+def run_checks(worktree):
+    """(exit code, combined output, seconds). Exit 124 means the time limit hit.
+
+    checks.sh runs in its own process group, and the time limit kills the whole group:
+    killing only bash would leave a test server or watcher holding the output pipe open,
+    and the gate would wait on it forever."""
+    start = time.monotonic()
+    proc = subprocess.Popen(["bash", str(CHECKS)], cwd=worktree, env=checks_env(), text=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    try:
+        log, _ = proc.communicate(timeout=TIMEOUT)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            log, _ = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:  # something left the group (setsid) and holds the pipe
+            proc.kill()
+            log = "(output lost: a process started by checks.sh escaped the time limit's kill)"
+        code = 124
+        log = (log or "") + f"\n[gate] checks.sh killed after {TIMEOUT}s (checks.timeout_sec)\n"
+    return code, log or "", int(time.monotonic() - start)
+
+
+def verify_seal():
+    """The gate runs the main checkout's checks.sh, so refuse if any control file changed since
+    `job seal`: a changed checks.sh would make the gate's verdict meaningless."""
+    res = subprocess.run([str(FACTORY / "bin" / "job"), "verify"], capture_output=True, text=True)
+    if res.returncode != 0:
+        die((res.stderr or res.stdout).strip().removeprefix("job: "))
+
+
+def gate(job_id, merge):
+    verify_seal()
+    job = load_job(job_id)
+    worktree = job["worktree"]
+    if job["round"] < 1:
+        die(f"{job_id} hasn't started a build round")
+    round_dir = FACTORY / "jobs" / job_id / f"round-{job['round']}"
+    commit = git(worktree, "rev-parse", "HEAD").strip()
+    protected = protected_changes(worktree)
+    held = held_changes(worktree, job_id)
+    files, adds, dels = diff_size(worktree)
+    over = size_note(files, adds, dels)
+    name = "merge-checks" if merge else "checks"
+    if held and not protected:
+        hold(job_id, job, round_dir / f"{name}.md", commit, held, f"{files} files, +{adds} -{dels}")
+    if held:  # protected paths fail the branch anyway; still run nothing the held files would install
+        code, log, seconds = 1, "(checks.sh did not run: held files need a human first)\n", 0
+    else:
+        code, log, seconds = run_checks(worktree)
+    verdict = "PASS" if code == 0 and not protected else "FAIL"
+    (round_dir / f"{name}.log").write_text(log)
+    tail = "\n".join(log.rstrip().splitlines()[-TAIL:])
+    summary = [
+        f"checks.sh {'passed' if code == 0 else f'failed with exit {code}'} in {seconds}s",
+        f"Protected paths: {'changed: ' + ', '.join(protected) if protected else 'none changed'}",
+        f"Commit {commit[:7]}" + (f", synced with the latest {CONFIG['base_branch']} before merging" if merge else ""),
+        f"Change size: {files} files, +{adds} -{dels}" + (f", {over}" if over else ""),
+    ]
+    (round_dir / f"{name}.md").write_text(
+        f"GATE: {verdict}\nCOMMIT: {commit}\nSIZE: {files} files, +{adds} -{dels}\n\n"
+        "## Summary\n" + "\n".join(f"- {s}" for s in summary) + "\n\n"
+        "## Protected paths\n"
+        + ("\n".join(f"- {p}" for p in protected) if protected else "None changed.")
+        + f"\n\n## checks.sh\nExit {code} in {seconds}s. Last {TAIL} lines of {name}.log:\n\n```\n{tail}\n```\n"
+    )
+    print(f"GATE: {verdict} ({job_id} round {job['round']}, checks.sh exit {code} in {seconds}s"
+          + (f", protected paths changed: {', '.join(protected)}" if protected else "") + ")")
+    sys.exit(0 if verdict == "PASS" else 1)
+
+
+def hold(job_id, job, out, commit, held, size):
+    """Write a HOLD verdict and stop: nothing runs until a human approves the held files."""
+    out.write_text(
+        f"GATE: HOLD\nCOMMIT: {commit}\nSIZE: {size}\nHOLD: {', '.join(held)}\n\n"
+        "## Summary\n"
+        "- checks.sh did not run: the branch changes files that install or fetch code\n"
+        f"- A human reviews them on the PR, then approves with `factory/bin/job allow {job['issue']}`\n"
+        "- Any later change to an approved file is held again\n\n"
+        "## Held files\n" + "\n".join(f"- {p}" for p in held) + "\n")
+    print(f"GATE: HOLD ({job_id} round {job['round']}: {', '.join(held)} need a human before checks run them)")
+    sys.exit(HOLD_EXIT)
+
+
+def main(argv):
+    if len(argv) == 1 and not argv[0].startswith("-"):
+        gate(argv[0], merge=False)
+    elif len(argv) == 2 and argv[1] == "--merge":
+        gate(argv[0], merge=True)
+    else:
+        die(__doc__.strip())
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

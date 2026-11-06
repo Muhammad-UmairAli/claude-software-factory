@@ -1,0 +1,58 @@
+# Tests and lint on every pull request and on main. Make the `tests` and `lint`
+# jobs required checks in a ruleset on main, where your GitHub plan allows one.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the oldest Python the factory supports; macOS is where it runs today.
+        os: [ubuntu-latest]
+        python: ["3.10", "3.12"]
+        include:
+          - os: macos-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit, pipeline and guard-corpus tests
+        run: python -m unittest discover -s tests -v
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install the pinned linter
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+      - name: Pyflakes (the scripts have no .py extension, so they are listed)
+        run: python -m pyflakes install factory/bin/job factory/bin/gate factory/bin/guard factory/bin/route factory/bin/doctor factory/bin/runtime factory/lib/*.py tests/*.py
+      - name: ShellCheck
+        run: |
+          command -v shellcheck >/dev/null || sudo apt-get install -y shellcheck
+          shellcheck factory/checks.sh factory/bin/git-credential-app factory/runtime/init-firewall.sh factory/runtime/entrypoint.sh

@@ -1,0 +1,47 @@
+# Builds the factory's runtime image and checks it: the
+# container ends up as an unprivileged user that can't change the firewall, has
+# the tools, reaches GitHub, and reaches nothing outside the allowlist. Runs when
+# the runtime changes, and weekly, because the base image and packages move.
+name: runtime
+
+on:
+  pull_request:
+    paths:
+      - "factory/runtime/**"
+      - "factory/bin/runtime"
+      - ".github/workflows/runtime.yml"
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the image
+        run: >-
+          docker build --tag factory-runtime
+          --build-arg CLAUDE_CODE_VERSION="$(cat .github/claude-code-tested)"
+          factory/runtime
+      - name: Firewall, user and tools
+        run: |
+          docker run --rm --cap-add=NET_ADMIN --cap-add=NET_RAW --security-opt no-new-privileges \
+            factory-runtime bash -c '
+              set -eu
+              test "$(id -un)" = node
+              if iptables -L >/dev/null 2>&1; then echo "node can change the firewall"; exit 1; fi
+              if curl -fsS --max-time 5 -o /dev/null https://example.com; then echo "egress is open"; exit 1; fi
+              curl -fsS --max-time 15 -o /dev/null https://api.github.com/zen
+              claude --version
+              gh --version
+              python3 --version
+              git --version
+              openssl version
+            '
