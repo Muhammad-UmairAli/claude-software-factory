@@ -5,9 +5,19 @@ Notable changes to this version of the factory. The format follows
 A27) refer to the backlog of a November 2026 security review of this version.
 Changes from the upstream project are listed in [NOTICE](NOTICE).
 
+## [Unreleased]
+
+### Changed
+
+- The README's diagrams are SVG images instead of Mermaid, in a light and a
+  dark version that follow the reader's GitHub theme. GitHub showed the
+  Mermaid diagrams in a small pan-and-zoom box. `docs/images/diagrams.py`
+  draws both versions from one layout.
+
 ## [0.3.0] - 2026-11-07
 
-Phase 2 of the review roadmap, and the first public release.
+Phase 2 of the review roadmap, and the first public release
+([claude-software-factory](https://github.com/Muhammad-UmairAli/claude-software-factory)).
 
 ### Added
 

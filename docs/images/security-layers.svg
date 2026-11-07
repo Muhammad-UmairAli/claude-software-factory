@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" width="900" height="520" role="img" aria-label="The security layers: untrusted input (issue text, comments, branch code) passes three layers before a change merges. Before any agent acts, only labeled issues from trusted authors run, and issue text reaches agents as quoted data. While agents work, a guard hook checks every tool call, a seal stops every job if the factory changes, and the runtime container holds no host credentials. Before anything merges, the gate runs your checks and holds dependency changes, reviewers look, with a security review for sensitive paths, and merge policy in code means you merge by default. Throughout, an outbound filter screens text posted to GitHub, a hash-chained log records every event, and doctor checks the setup before each run." font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif">
+<title>The security layers: untrusted input (issue text, comments, branch code) passes three layers before a change merges. Before any agent acts, only labeled issues from trusted authors run, and issue text reaches agents as quoted data. While agents work, a guard hook checks every tool call, a seal stops every job if the factory changes, and the runtime container holds no host credentials. Before anything merges, the gate runs your checks and holds dependency changes, reviewers look, with a security review for sensitive paths, and merge policy in code means you merge by default. Throughout, an outbound filter screens text posted to GitHub, a hash-chained log records every event, and doctor checks the setup before each run.</title>
+<defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" fill="#59636E"/></marker></defs>
+<rect x="110" y="16" width="420" height="44" rx="22" fill="#FFEBE9" stroke="#FF8182" stroke-width="1.5"/>
+<text x="320.0" y="43.0" fill="#82071E" font-size="13.5" font-weight="600" text-anchor="middle">Untrusted input: issue text, comments, branch code</text>
+<rect x="40" y="92" width="560" height="92" rx="10" fill="#F6F8FA" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="56" y="114" fill="#1F2328" font-size="13.5" font-weight="600" text-anchor="start">Before any agent acts</text>
+<rect x="56.0" y="126" width="259.0" height="44" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="185.5" y="144.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Only labeled issues</text>
+<text x="185.5" y="160.5" fill="#1F2328" font-size="12.5" text-anchor="middle">from trusted authors</text>
+<rect x="325.0" y="126" width="259.0" height="44" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="454.5" y="144.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Issue text reaches agents</text>
+<text x="454.5" y="160.5" fill="#1F2328" font-size="12.5" text-anchor="middle">as quoted data</text>
+<rect x="40" y="212" width="560" height="100" rx="10" fill="#F6F8FA" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="56" y="234" fill="#1F2328" font-size="13.5" font-weight="600" text-anchor="start">While agents work</text>
+<rect x="56.0" y="246" width="169.33333333333334" height="44" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="140.66666666666669" y="264.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Guard hook on</text>
+<text x="140.66666666666669" y="280.5" fill="#1F2328" font-size="12.5" text-anchor="middle">every tool call</text>
+<rect x="235.33333333333334" y="246" width="169.33333333333334" height="44" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="320.0" y="264.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Seal: a factory change</text>
+<text x="320.0" y="280.5" fill="#1F2328" font-size="12.5" text-anchor="middle">stops every job</text>
+<rect x="414.6666666666667" y="246" width="169.33333333333334" height="44" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="499.33333333333337" y="264.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Runtime container:</text>
+<text x="499.33333333333337" y="280.5" fill="#1F2328" font-size="12.5" text-anchor="middle">no host credentials</text>
+<rect x="40" y="340" width="560" height="100" rx="10" fill="#F6F8FA" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="56" y="362" fill="#1F2328" font-size="13.5" font-weight="600" text-anchor="start">Before anything merges</text>
+<rect x="56.0" y="374" width="169.33333333333334" height="44" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="140.66666666666669" y="392.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Gate runs your checks;</text>
+<text x="140.66666666666669" y="408.5" fill="#1F2328" font-size="12.5" text-anchor="middle">dependencies held</text>
+<rect x="235.33333333333334" y="374" width="169.33333333333334" height="44" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="320.0" y="392.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Reviews, plus security</text>
+<text x="320.0" y="408.5" fill="#1F2328" font-size="12.5" text-anchor="middle">for sensitive paths</text>
+<rect x="414.6666666666667" y="374" width="169.33333333333334" height="44" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="499.33333333333337" y="392.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Merge policy in code;</text>
+<text x="499.33333333333337" y="408.5" fill="#1F2328" font-size="12.5" text-anchor="middle">you merge by default</text>
+<polyline points="320,60 320,92" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="320,184 320,212" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="320,312 320,340" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="320,440 320,468" fill="none" stroke="#59636E" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<rect x="170" y="468" width="300" height="40" rx="20" fill="#DAFBE1" stroke="#4AC26B" stroke-width="1.5"/>
+<text x="320.0" y="493.0" fill="#044F1E" font-size="13.5" font-weight="600" text-anchor="middle">A merged change</text>
+<rect x="630" y="92" width="250" height="348" rx="10" fill="#F6F8FA" stroke="#D0D7DE" stroke-width="1.5"/>
+<text x="646" y="114" fill="#1F2328" font-size="13.5" font-weight="600" text-anchor="start">On everything</text>
+<rect x="646" y="150" width="218" height="56" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="755.0" y="174.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Outbound filter on all</text>
+<text x="755.0" y="190.5" fill="#1F2328" font-size="12.5" text-anchor="middle">text posted to GitHub</text>
+<rect x="646" y="242" width="218" height="56" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="755.0" y="266.5" fill="#1F2328" font-size="12.5" text-anchor="middle">Hash-chained audit log</text>
+<text x="755.0" y="282.5" fill="#1F2328" font-size="12.5" text-anchor="middle">of every event</text>
+<rect x="646" y="334" width="218" height="56" rx="6" fill="#FFFFFF" stroke="#D0D7DE" stroke-width="1"/>
+<text x="755.0" y="358.5" fill="#1F2328" font-size="12.5" text-anchor="middle">doctor checks the setup</text>
+<text x="755.0" y="374.5" fill="#1F2328" font-size="12.5" text-anchor="middle">before every run</text>
+</svg>
