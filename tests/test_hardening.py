@@ -305,7 +305,7 @@ class OperationsTest(unittest.TestCase):
         self.assertTrue(queue.startswith("paused"), queue)
         self.assertIn("Rotating the token", queue)
         self.assertNotIn("resume\t", queue)
-        self.box.write(f"factory/jobs/{jid}/spec.md", "# x\n")
+        self.box.write(f"factory/jobs/{jid}/spec.md", "# x\n\n## Summary\n- x\n")
         self.box.agent("spec-writer")
         refused = self.box.run("job", "advance", jid, "build", ok=False)
         self.assertNotEqual(refused.returncode, 0)

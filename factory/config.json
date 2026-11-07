@@ -123,5 +123,6 @@
     "claude-haiku-5-5":  { "input": 0.10, "output": 0.50, "cache_write_5m": 0.125, "cache_write_1h": 0.20, "cache_read": 0.01,
                            "long_prompt": { "over_tokens": 100000, "input": 0.50, "output": 2.50, "cache_write_5m": 0.625, "cache_write_1h": 1.0, "cache_read": 0.05 } }
   },
+  "prices_owner": null,
   "prices_checked": "2026-11-05, https://platform.claude.com/docs/en/about-claude/pricing"
 }

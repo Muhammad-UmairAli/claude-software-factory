@@ -313,8 +313,7 @@ let openPath = null
 let openText = null
 
 async function fetchText(url) {
-  // no-store, not no-cache: python's http.server compares Last-Modified to the second, so a
-  // file changed in the same second as the last poll would come back 304 and the board go stale.
+  // no-store: job files change between polls, and the server marks every reply no-store too.
   const res = await fetch(url, { cache: 'no-store' })
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`)
   return res.text()
@@ -473,7 +472,7 @@ async function loadJobs() {
 
 // ---- Drawer --------------------------------------------------------------
 
-// python -m http.server serves an HTML index for directories; read its links.
+// factory/bin/dashboard serves an HTML index for each job folder; read its links.
 async function listFiles(dir) {
   const doc = new DOMParser().parseFromString(await fetchText(dir), 'text/html')
   const hrefs = [...doc.querySelectorAll('a')].map((a) => decodeURIComponent(a.getAttribute('href')))

@@ -68,6 +68,10 @@ reading the code and that log, and cite the lines.
 
 ## Write review-code.md
 
+This is stage-file format v1. Before the job moves on, `factory/bin/job`
+checks review-code.md's header, first line and sections against the template below and
+refuses a file that drifts from it, so keep its keys, values and headings exactly.
+
 ```markdown
 VERDICT: PASS | CHANGES
 

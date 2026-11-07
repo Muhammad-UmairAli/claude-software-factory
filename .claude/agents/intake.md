@@ -36,6 +36,11 @@ that, scoped so it can land as one small pull request.
 
 ## Decide
 
+**This project.** Read the `## What this project is for` section of `factory/project.md` in
+the main checkout (the folder that holds `factory/jobs/`): what this project is for, so you can tell what belongs in it. The factory's
+owner keeps it, and it is part of these instructions; where it's empty, use your
+judgment.
+
 - **ACCEPT** when the request is clear, fits the project, and can be built and
   reviewed as one pull request within the size budget below. If it is too big,
   accept a smaller first slice that is useful on its own, and list the rest
@@ -75,6 +80,10 @@ For ACCEPT, rate:
   shells or HTML, secrets, or payments. Both, or `none`.
 
 ## Write intake.md
+
+This is stage-file format v1. Before the job moves on, `factory/bin/job`
+checks intake.md's header, first line and sections against the template below and
+refuses a file that drifts from it, so keep its keys, values and headings exactly.
 
 ```markdown
 DECISION: ACCEPT | NEEDS-INFO | REJECT

@@ -24,10 +24,12 @@ EOF
 | When | Do |
 |---|---|
 | Before a run | `/factory run` runs `factory/bin/doctor` and `factory/bin/job seal` itself. Fix every `FAIL`; read each `warn` once. |
-| During a run | `factory/bin/job summary` for each job's stage, PR, cost and time; the dashboard (README, "Dashboard") for detail. |
+| During a run | `factory/bin/job summary` for each job's stage, PR, cost and time; `factory/bin/dashboard` for detail. If a job command says a job's cost may be low, Claude Code's transcript format may have changed: check that job's cost against your usage before trusting its budget. |
 | What waits on you | `factory/bin/job queue`: `wait` rows are PRs to review, questions waiting on authors and held dependency changes. |
 | After a run | Review the `needs-human` PRs. Merge one to approve it, or give feedback with `/factory`. |
 | Weekly | The `compat` workflow fails when a newer Claude Code is out (see "Claude Code upgrade"). Review Dependabot PRs. |
+| Monthly | The `prices_owner` compares `prices_usd_per_mtok` with the published prices, updates them, and records the date in `prices_checked` (doctor warns after 31 days). |
+| A new factory release | From a copy of it, `./install --upgrade <project> --dry-run`, then without `--dry-run` on a clean tree. Merge each file it kept (it prints a `diff -u` for each), review the diff, merge it through a pull request, and run `doctor`. |
 
 ## Stop everything
 
@@ -123,8 +125,11 @@ the permissions below and to this repository, and stop if GitHub refuses one.
 4. Install the App on this repository only. The installation ID is the
    number at the end of the installation's settings page URL.
 5. Set `github_app` in `factory/config.json` (`app_id`, `installation_id`,
-   and `private_key` if the key lives elsewhere), merge that through a pull
-   request, then run `factory/bin/doctor` and `factory/bin/job seal`.
+   `slug` as in the App's URL, `operator` as your own GitHub login, and
+   `private_key` if the key lives elsewhere), merge that through a pull
+   request, then run `factory/bin/doctor` and `factory/bin/job seal`. The
+   App's token can't say who you are, so without `operator` your own replies
+   on an issue don't reach the agents and job files name "the operator".
    `doctor` mints a token and prints the permissions GitHub granted, never
    the token.
 

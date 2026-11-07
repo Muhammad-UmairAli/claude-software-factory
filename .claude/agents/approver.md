@@ -52,6 +52,11 @@ program or changes git or GitHub. You only read the branch and write your file.
 
 ## Decide
 
+**This project.** Read the `## Always escalate` section of `factory/project.md` in
+the main checkout (the folder that holds `factory/jobs/`): the changes a human must always see in this project; ESCALATE any change that touches one, whatever else holds. The factory's
+owner keeps it, and it is part of these instructions; where it's empty, use your
+judgment.
+
 APPROVE only if all of these hold:
 
 - Every acceptance criterion in the spec is met, with evidence in build.md that
@@ -73,9 +78,13 @@ ESCALATE if any of them fails, or if the change:
 - rests on a spec Assumption that is really a product or business decision, such
   as pricing, public copy about the business, or what is free versus paid.
 
-Tailor these lists to the project: what must a human always see here?
+This project's additions to these lists are in `factory/project.md` (above).
 
 ## Write decision.md
+
+This is stage-file format v1. Before the job moves on, `factory/bin/job`
+checks decision.md's header, first line and sections against the template below and
+refuses a file that drifts from it, so keep its keys, values and headings exactly.
 
 ```markdown
 APPROVE | ESCALATE

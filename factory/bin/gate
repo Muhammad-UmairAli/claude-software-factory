@@ -17,7 +17,6 @@ tokens such as GH_TOKEN or cloud credentials out of reach) and a time limit
 (`checks.timeout_sec`). Neither is a sandbox: see DESIGN.md, "Security model".
 """
 
-import fnmatch
 import json
 import os
 import re
@@ -29,7 +28,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 FACTORY = REPO / "factory"
-CONFIG = json.loads((FACTORY / "config.json").read_text())
+sys.path.append(str(FACTORY / "lib"))  # appended, so the standard library always wins a name clash
+import branch_diff  # noqa: E402  (factory/lib: what a branch changed, read the same way as job)
+import factory_config  # noqa: E402  (factory/lib: config.json with its defaults, shared by every script)
+CONFIG = factory_config.load(FACTORY)
 CHECKS = FACTORY / "checks.sh"
 CHECKS_CFG = CONFIG.get("checks", {})
 TIMEOUT = int(CHECKS_CFG.get("timeout_sec", 1800))
@@ -64,12 +66,9 @@ def protected_changes(worktree):
     is as dangerous as an edited one."""
     diff = git(worktree, "diff", "--name-status", f"origin/{CONFIG['base_branch']}...HEAD")
     hits = []
-    for line in diff.splitlines():
-        status, *paths = line.split("\t")
-        for path in paths:  # for renames and copies, both the old and the new path
-            if any(fnmatch.fnmatch(path, pattern) for pattern in CONFIG["protected_paths"]):
-                hits.append(f"{status[0]} {path}")
-                break
+    for status, path in branch_diff.name_status(diff):  # renames and copies: the old and the new path
+        if branch_diff.matches(path, CONFIG["protected_paths"]) and f"{status} {path}" not in hits:
+            hits.append(f"{status} {path}")
     return hits
 
 
@@ -90,24 +89,13 @@ def held_changes(worktree, job_id):
     except (OSError, ValueError):
         allowed = {}
     diff = git(worktree, "diff", "--name-status", f"origin/{CONFIG['base_branch']}...HEAD")
-    held = set()
-    for line in diff.splitlines():
-        for path in line.split("\t")[1:]:
-            if any(fnmatch.fnmatch(path, p) for p in patterns) and allowed.get(path) != blob(worktree, path):
-                held.add(path)
-    return sorted(held)
+    return sorted({path for _, path in branch_diff.name_status(diff)
+                   if branch_diff.matches(path, patterns) and allowed.get(path) != blob(worktree, path)})
 
 
 def diff_size(worktree):
     """(files, insertions, deletions) the branch changed against the base. Binary files count as files."""
-    out = git(worktree, "diff", "--numstat", f"origin/{CONFIG['base_branch']}...HEAD")
-    files = adds = dels = 0
-    for line in out.splitlines():
-        added, deleted, _ = line.split("\t", 2)
-        files += 1
-        if added != "-":
-            adds, dels = adds + int(added), dels + int(deleted)
-    return files, adds, dels
+    return branch_diff.numstat(git(worktree, "diff", "--numstat", f"origin/{CONFIG['base_branch']}...HEAD"))
 
 
 def size_note(files, adds, dels):

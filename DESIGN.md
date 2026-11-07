@@ -169,9 +169,56 @@ with the job's folder, so `factory/bin/job` sums the transcripts that name it
 and prices them with `prices_usd_per_mtok`, including Haiku's long-prompt
 tier. When a job's cost passes `max_cost_usd_per_job`, it goes to a human
 instead of another round. The figure is API-equivalent; on a subscription it
-shows relative spend, not your bill. The transcript format isn't a documented
-interface, so unreadable lines are skipped and unknown models are reported
-rather than allowed to block a state change.
+shows relative spend, not your bill. The orchestrator's own tokens are
+attributed per run: a session that ran factory agents is a run, and its
+transcript's cost is shared evenly by that run's jobs, reported apart from the
+budget so one job's spend can't move another's cap. The transcript format
+isn't a documented interface: unreadable lines and usage records are counted,
+never allowed to block a state change, and reported as "cost may be low" by
+the job command, `job summary`, the audit trail and `doctor`, which also wants
+a named `prices_owner` and a price check within the month.
+
+**One prompt per agent, built from shared blocks; the project's facts apart.**
+The prompts in `.claude/agents/` are built by `prompts/build.py` from a source
+per agent and blocks they share (the worktree rules, the read-only shell, the
+Summary section, the stage-file format), so a rule fixed once is fixed for
+every agent, and CI fails when the built prompts drift from their sources.
+Nothing about a particular project goes in a prompt: the agents read
+`factory/project.md` (what the project is for, its security hot spots, design
+system, users and what must always reach a human). That keeps the prompts the
+same in every installed copy, so `./install --upgrade` can replace them.
+
+**Stage files have a versioned format.** Agents hand each other markdown files
+whose first lines the scripts read. `factory/lib/stage_files.py` defines each
+one's header, first line and required sections; `job advance` checks a file
+before a move that depends on it and refuses one that drifts, naming the
+problem. Each prompt names the format version, and a test holds the prompts
+and the schema together, so a prompt edit that changes a header fails in CI
+instead of mis-routing a job. An escalation is never held up by a file's
+format: a human takes over instead.
+
+**Installed copies are versioned, not hand-tailored.** `./install` records the
+release in `factory/VERSION` and a hash of every file it placed in
+`factory/install.json`. An upgrade replaces only the files whose hash still
+matches, keeps the ones you changed, and never touches the project's
+`config.json`, `checks.sh` or `project.md`; `doctor` reports changed and
+missing files. CODEOWNERS can name the factory's owners for `factory/` and
+`.claude/`, so an ordinary pull request can't weaken the guard or the config
+unseen.
+
+**Not a Claude Code plugin, for now.** A plugin could carry the agents, the
+skill and the scripts, but the factory's controls depend on three things a
+plugin doesn't give today, per the Claude Code plugin documentation as of
+2026-11-07: per-agent `hooks` in frontmatter, which plugin agents ignore (the
+guard would become a session-wide plugin hook); files in the repository's own
+history, where the seal fingerprints them and CODEOWNERS protects them (plugin
+files live in a per-user cache); and one version for everyone on a project
+(a project can enable a plugin but not pin its version). Revisit when plugins
+gain those; the repo-local install with a version record covers the same need
+until then. Sources:
+[plugin components](https://code.claude.com/docs/en/plugins/components),
+[subagents](https://code.claude.com/docs/en/sub-agents),
+[plugin loading and versions](https://code.claude.com/docs/en/plugins/loading).
 
 ## Security model
 

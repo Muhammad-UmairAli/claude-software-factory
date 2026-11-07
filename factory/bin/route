@@ -18,7 +18,9 @@ import sys
 from pathlib import Path
 
 FACTORY = Path(__file__).resolve().parents[1]
-CONFIG = json.loads((FACTORY / "config.json").read_text())
+sys.path.append(str(FACTORY / "lib"))  # appended, so the standard library always wins a name clash
+import factory_config  # noqa: E402  (factory/lib: config.json with its defaults, shared by every script)
+CONFIG = factory_config.load(FACTORY)
 
 
 def die(msg):

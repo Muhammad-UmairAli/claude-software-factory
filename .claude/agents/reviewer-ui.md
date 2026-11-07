@@ -56,6 +56,11 @@ never kill by process name.
 
 ## What to look for
 
+**This project.** Read the `## Design system` section of `factory/project.md` in
+the main checkout (the folder that holds `factory/jobs/`): where this project's design tokens, theme and shared components live. The factory's
+owner keeps it, and it is part of these instructions; where it's empty, use your
+judgment.
+
 - It looks like it belongs in the app: the same colours, type scale, spacing,
   radii and backgrounds as the components around it.
 - It uses the existing styling system and classes. Flag new one-off CSS or
@@ -67,6 +72,10 @@ never kill by process name.
 If the branch has no visual change, write PASS and say so.
 
 ## Write review-ui.md
+
+This is stage-file format v1. Before the job moves on, `factory/bin/job`
+checks review-ui.md's header, first line and sections against the template below and
+refuses a file that drifts from it, so keep its keys, values and headings exactly.
 
 ```markdown
 VERDICT: PASS | CHANGES

@@ -13,16 +13,37 @@ checkout at a tag instead.
 
 `./install <project>`, run from this folder, does steps 0 and 1 and the
 mechanical parts of step 2: it checks the project, copies the files, drafts
-`factory/checks.sh` from the project's own files, sets `base_branch`, adds the
-`.gitignore` lines and the `AGENTS.md` section, prints the label commands (or
-creates the labels with `--create-labels`), and runs `factory/bin/doctor
---offline`. It never overwrites a file and never commits; `--dry-run` shows
-the plan first.
+`factory/checks.sh` from the project's own files, writes `factory/project.md`
+with the headings for the project's facts, sets `base_branch`, adds the
+`.gitignore` lines, the `AGENTS.md` section and, with `--owner @login`
+(repeatable; `@org/team` works too), a CODEOWNERS entry for `factory/` and
+`.claude/`, prints the label commands (or creates the labels with
+`--create-labels`), and runs `factory/bin/doctor --offline`. It records the
+release in `factory/VERSION` and a sha256 of every file it placed in
+`factory/install.json`, which `doctor` checks. It never overwrites a file and
+never commits; `--dry-run` shows the plan first.
 
 After it, carry on with what needs judgment: read and run the drafted
-`checks.sh`, tailor the agents, `escalate_paths` and `sensitive_paths`, and
-`.claude/settings.json` (step 2), then steps 3 and 4. An agent installing by
-hand follows every step below.
+`checks.sh`, fill in `factory/project.md`, set `escalate_paths` and
+`sensitive_paths`, and decide on `.claude/settings.json` (step 2), then steps
+3 and 4. An agent installing by hand follows every step below; a hand install
+has no `install.json`, so `doctor` warns and `--upgrade` can't help it later.
+
+**Upgrading** (from a copy of the new release, on a clean tree):
+`./install --upgrade <project>` replaces each factory file that still matches
+the hash `install.json` recorded, adds the release's new files, removes the
+ones it dropped if you never changed them, and keeps every file you changed,
+printing a `diff -u` command to merge each by hand. `config.json`, `checks.sh`
+and `project.md` are the project's and are never touched; it names the
+settings the new release's `config.json` has and yours lacks (the scripts use
+defaults for them). Review the diff, commit it on a branch, merge it through
+review, and run `doctor` again.
+
+**Uninstalling:** `./install --uninstall <project>` refuses while a job is
+open, then removes the files the installer placed (keeping any you changed),
+`install.json`, and the `.gitignore` lines, `AGENTS.md` section and CODEOWNERS
+entry it added. The project's `config.json`, `checks.sh`, `project.md` and
+`factory/jobs/` (job state and the audit log) stay until you delete them.
 
 ## 0. Check the project
 
@@ -54,34 +75,43 @@ Tell the user, once, before you go on:
 
 ## 1. Copy
 
-Copy these files to the same paths in the project, unchanged:
+`./install` does this step and records what it copied (step 0's setup command). By hand, copy
+these files to the same paths in the project, unchanged:
 
 ```
-.claude/skills/factory/SKILL.md
-.claude/agents/intake.md
-.claude/agents/spec-writer.md
+.claude/agents/approver.md
 .claude/agents/builder.md
+.claude/agents/intake.md
 .claude/agents/reviewer-code.md
 .claude/agents/reviewer-security.md
-.claude/agents/reviewer-ux.md
 .claude/agents/reviewer-ui.md
-.claude/agents/approver.md
-factory/config.json
-factory/checks.sh
-factory/bin/job
-factory/bin/gate
-factory/bin/route
-factory/bin/guard
+.claude/agents/reviewer-ux.md
+.claude/agents/spec-writer.md
+.claude/skills/factory/SKILL.md
+factory/VERSION
+factory/bin/dashboard
 factory/bin/doctor
+factory/bin/gate
 factory/bin/git-credential-app
+factory/bin/guard
+factory/bin/job
+factory/bin/route
 factory/bin/runtime
-factory/lib/github_app.py
+factory/dashboard.html
 factory/lib/audit.py
+factory/lib/branch_diff.py
+factory/lib/factory_config.py
+factory/lib/github_app.py
+factory/lib/issue_text.py
+factory/lib/job_cost.py
+factory/lib/job_report.py
+factory/lib/stage_files.py
 factory/runtime/Dockerfile
+factory/runtime/egress-allowlist
 factory/runtime/entrypoint.sh
 factory/runtime/init-firewall.sh
-factory/runtime/egress-allowlist
-factory/dashboard.html
+factory/config.json
+factory/checks.sh
 ```
 
 Also copy `LICENSE` to `factory/LICENSE` and `NOTICE` to `factory/NOTICE`, so
@@ -142,18 +172,24 @@ non-interactive, must not rewrite tracked files (no `--fix`, no
   `surface_reviewers` and `prices_usd_per_mtok` as they are unless the user
   asks. Suggest they run `BENCHMARK.md` before changing `profiles`.
 
-**Agents.** The checklists are general on purpose. Tailor them to the stack
-without changing their structure, file names, frontmatter (especially the
-`hooks:` block), first-line formats or one-line replies:
+**The project's facts** (`factory/project.md`). The agents' prompts are the
+same in every project, so an upgrade can replace them; what is particular to
+this one goes in `factory/project.md`, which the agents read. Fill in each
+section in a few lines, and leave the prompts in `.claude/agents/` as they are
+(an upgrade keeps a prompt you changed, but then it no longer gets fixes):
 
-- `reviewer-security.md`: this project's hot spots (its auth, its data access
-  rules, its payment and webhook code, where user input meets queries or HTML).
-- `reviewer-ui.md`: where the design tokens, theme and shared components live.
-- `reviewer-ux.md`: the kinds of users the app has.
-- `approver.md`: what a human must always see in this project, added to the
-  ESCALATE list.
-- `intake.md`: one line under **Decide** saying what the project is for, so
-  intake can tell what belongs.
+- **What this project is for**: intake uses it to tell what belongs.
+- **Security hot spots**: the security reviewer looks hardest here (the auth,
+  the data access rules, payment and webhook code, where user input meets
+  queries or HTML).
+- **Design system**: where the UI reviewer finds the design tokens, theme and
+  shared components.
+- **Users**: the kinds of users the app has, for the UX reviewer.
+- **Always escalate**: what a human must always see, which the approver adds
+  to its ESCALATE list.
+
+It's a control file like the rest of `factory/`: changes go through review,
+and the seal stops a run if it changes mid-run.
 
 **`AGENTS.md`** (or `CLAUDE.md`, whichever the project uses; create `AGENTS.md`
 if neither exists). Every agent reads it. Make sure it says:
@@ -172,8 +208,7 @@ intake → spec → build → gate → review → approve, one PR per issue; a h
 merges unless `auto_merge` allows it. State is in `factory/jobs/`
 (gitignored); `factory/bin/job` is its only writer. Checks:
 `factory/checks.sh`. Preflight: `factory/bin/doctor`. Dashboard:
-`cd factory && python3 -m http.server --bind 127.0.0.1 8000`, then open
-http://127.0.0.1:8000/dashboard.html.
+`factory/bin/dashboard`, then open the link it prints.
 
 Each job works in its own git worktree, a full checkout of the repo at
 `.worktrees/<job-id>` (gitignored). A tool run from the repo root that doesn't

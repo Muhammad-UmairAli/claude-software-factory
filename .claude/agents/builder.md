@@ -108,6 +108,10 @@ command you ran and its result, or what the page showed.
 
 ## Write build.md
 
+This is stage-file format v1. Before the job moves on, `factory/bin/job`
+checks build.md's header, first line and sections against the template below and
+refuses a file that drifts from it, so keep its keys, values and headings exactly.
+
 Rewrite it at the end of every round. Keep the Log from earlier rounds and add
 an entry for this one.
 

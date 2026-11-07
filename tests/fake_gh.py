@@ -29,6 +29,10 @@ def main(argv):
         # A test asked this call to fail, as a network error would.
         sys.stderr.write(f"fake gh: injected failure for {argv}\n")
         code = 1
+    elif cmd == ["api", "user"] and os.environ.get("GH_TOKEN", "").startswith("ghs_"):
+        # As on GitHub: an App installation token isn't a user, so GET /user is refused.
+        sys.stderr.write("gh: Resource not accessible by integration (HTTP 403)\n")
+        code = 1
     elif cmd == ["api", "user"]:
         out = "operator\n"
     elif argv[:3] == ["api", "-i", "user"]:

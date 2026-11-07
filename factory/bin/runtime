@@ -14,13 +14,11 @@ credential helper, no cloud credentials. It starts with an egress firewall
 (factory/runtime/init-firewall.sh) and then runs as an unprivileged user that
 can't get root back.
 
-The dashboard: inside, run `python3 -m http.server --bind 0.0.0.0 8000` from
-factory/ and open http://127.0.0.1:8000/dashboard.html on your machine; the
-port is published on 127.0.0.1 only.
+The dashboard: inside, run `factory/bin/dashboard --bind 0.0.0.0` and open the
+link it prints on your machine; the port is published on 127.0.0.1 only.
 """
 
 import hashlib
-import json
 import os
 import shlex
 import subprocess
@@ -29,7 +27,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 RUNTIME = REPO / "factory" / "runtime"
-CONFIG = json.loads((REPO / "factory" / "config.json").read_text())
+sys.path.append(str(REPO / "factory" / "lib"))  # appended, so the standard library always wins a name clash
+import factory_config  # noqa: E402  (factory/lib: config.json with its defaults, shared by every script)
+CONFIG = factory_config.load(REPO / "factory")
 TESTED = REPO / ".github" / "claude-code-tested"  # absent in projects the factory is installed into
 DEFAULT_KEY = "~/.config/software-factory/github-app.pem"
 

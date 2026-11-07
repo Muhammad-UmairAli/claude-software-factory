@@ -226,7 +226,9 @@ then moves the job to `merged`; stop any agents still running for it.
 3. Each time a job finishes, run `factory/bin/job queue` again and start its
    `resume` lines you aren't already running and its `new` lines.
 4. When nothing is queued or running, print `factory/bin/job summary <ids>`
-   for the jobs this run touched, then list what waits on a human: PRs to
+   for the jobs this run touched, and repeat any line it prints saying a
+   job's cost may be low (the transcript format may have changed, so the
+   budget may under-count). Then list what waits on a human: PRs to
    review (merge one to approve it, or give feedback with `/factory`) and
    questions waiting on authors. If `audit.forward_url` is set in
    `factory/config.json`, run `factory/bin/job audit ship` and mention any

@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Serve the factory's dashboard on this machine only, read-only.
+
+Usage:
+  dashboard [--port 8000]      print a link for this run, then serve until Ctrl-C
+  dashboard --bind 0.0.0.0     inside the runtime container only, which publishes
+                               the port on your machine's 127.0.0.1
+
+Open the link it prints. It carries a token made for this run, which the server
+sets as a cookie and drops from the address. The server answers only requests
+that carry that token and whose Host is 127.0.0.1 or localhost on its port, so a
+web page you visit can't read job files through DNS rebinding (SEC-11), and other
+users of this machine can't browse them. It serves dashboard.html and the job
+folders under factory/jobs: no config, scripts, seal, cost cache or audit log, no
+dotfiles, nothing a symlink points to outside the job folders, and every job file
+as plain text or JSON, never as HTML.
+"""
+
+import hmac
+import html
+import re
+import secrets
+import sys
+import urllib.parse
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+FACTORY = Path(__file__).resolve().parents[1]
+JOBS = FACTORY / "jobs"
+BOARD = FACTORY / "dashboard.html"
+COOKIE = "factory_dashboard"
+JOB_ID = re.compile(r"\d{3,}-[a-z0-9-]+")
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # a job file or folder name: no dotfiles, no ..
+TYPES = {".json": "application/json"}  # anything else in a job folder is plain text
+# The board's own policy, sent on every response too, plus no framing.
+CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
+       "img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "factory-dashboard"
+    sys_version = ""
+
+    def do_GET(self):
+        self.answer(body=True)
+
+    def do_HEAD(self):
+        self.answer(body=False)
+
+    def refuse_method(self):
+        self.reply(HTTPStatus.METHOD_NOT_ALLOWED, b"read-only\n", "text/plain; charset=utf-8", extra={"Allow": "GET, HEAD"})
+
+    do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = refuse_method
+
+    def answer(self, body):
+        port = self.server.server_address[1]
+        host = (self.headers.get("Host") or "").lower()
+        if host not in {f"127.0.0.1:{port}", f"localhost:{port}"}:
+            return self.reply(HTTPStatus.FORBIDDEN, b"wrong host\n", body=body)
+        url = urllib.parse.urlsplit(self.path)
+        given = urllib.parse.parse_qs(url.query).get("token", [""])[0]
+        if url.path == "/" and given:
+            if not same(given, self.server.token):
+                return self.reply(HTTPStatus.FORBIDDEN, b"wrong token\n", body=body)
+            # The link: keep the token as a cookie, and take it out of the address bar and history.
+            return self.reply(HTTPStatus.SEE_OTHER, b"", body=body, extra={
+                "Location": "/dashboard.html",
+                "Set-Cookie": f"{COOKIE}={self.server.token}; HttpOnly; SameSite=Strict; Path=/"})
+        if not same(self.cookie(), self.server.token):
+            return self.reply(HTTPStatus.FORBIDDEN, b"open the link factory/bin/dashboard printed\n", body=body)
+        if url.path in {"/", "/dashboard.html"}:
+            return self.reply(HTTPStatus.OK, BOARD.read_bytes(), "text/html; charset=utf-8", body=body)
+        target = job_path(url.path)
+        if target is None:
+            return self.reply(HTTPStatus.NOT_FOUND, b"not found\n", body=body)
+        if target.is_dir():
+            return self.reply(HTTPStatus.OK, listing(target).encode(), "text/html; charset=utf-8", body=body)
+        return self.reply(HTTPStatus.OK, target.read_bytes(), TYPES.get(target.suffix, "text/plain; charset=utf-8"),
+                          body=body)
+
+    def cookie(self):
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE:
+                return value
+        return ""
+
+    def reply(self, status, data, ctype="text/plain; charset=utf-8", body=True, extra=None):
+        self.send_response(status)
+        headers = {"Content-Type": ctype, "Content-Length": str(len(data)), "Cache-Control": "no-store",
+                   "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer",
+                   "Content-Security-Policy": CSP, "Cross-Origin-Resource-Policy": "same-origin", **(extra or {})}
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.end_headers()
+        if body:
+            self.wfile.write(data)
+
+    def log_message(self, fmt, *args):
+        # The method, path and status only: never the query string, since the link's carries the token.
+        path = urllib.parse.urlsplit(getattr(self, "path", "") or "").path
+        self.server.log(f"{getattr(self, 'command', None) or '-'} {path} {args[-1] if args else ''}")
+
+    def log_request(self, code="-", size="-"):
+        self.log_message("%s", getattr(code, "value", code))
+
+
+def same(given, token):
+    """Constant-time comparison, safe for any header text a client sends."""
+    return hmac.compare_digest(given.encode("utf-8", "surrogateescape"), token.encode())
+
+
+ROUND = re.compile(r"round-\d+")
+
+
+def job_path(path):
+    """The file or folder under factory/jobs a URL path names, or None unless the board may read it:
+    jobs/, a job folder, its round folders, and the files in those."""
+    parts = urllib.parse.unquote(path).split("/")
+    if parts[:2] != ["", "jobs"]:
+        return None
+    rest = [p for p in parts[2:] if p]
+    folder = path.endswith("/")
+    if len(rest) > 3 or not all(NAME.fullmatch(p) for p in rest):
+        return None
+    if rest and not JOB_ID.fullmatch(rest[0]):
+        return None
+    if len(rest) == 3 and not ROUND.fullmatch(rest[1]):
+        return None
+    if folder and (len(rest) == 3 or (len(rest) == 2 and not ROUND.fullmatch(rest[1]))):
+        return None
+    try:
+        real = JOBS.joinpath(*rest).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    jobs = JOBS.resolve()
+    if real != jobs and jobs not in real.parents:
+        return None  # a symlink that points out of the job folders
+    if real.is_dir() != folder:
+        return None
+    return real
+
+
+def listing(folder):
+    """An HTML index of a job folder, as python's http.server writes one: the board reads its links."""
+    jobs = folder == JOBS.resolve()
+    names = []
+    for p in sorted(folder.iterdir()):
+        if not NAME.fullmatch(p.name):
+            continue
+        if p.is_dir():
+            if jobs and not JOB_ID.fullmatch(p.name):
+                continue
+            if not jobs and not ROUND.fullmatch(p.name):
+                continue
+            names.append(p.name + "/")
+        elif not jobs:
+            names.append(p.name)
+    items = "".join(f'<li><a href="{urllib.parse.quote(n)}">{html.escape(n)}</a></li>\n' for n in names)
+    return f"<!doctype html>\n<meta charset=\"utf-8\">\n<ul>\n{items}</ul>\n"
+
+
+BINDS = {"127.0.0.1", "0.0.0.0"}  # this machine, or every interface of the runtime container
+
+
+def make_server(port=8000, token=None, bind="127.0.0.1"):
+    """A server on this machine, with a fresh random token unless one is given (tests)."""
+    if bind not in BINDS:
+        raise ValueError(f"bind must be one of {sorted(BINDS)}")
+    server = ThreadingHTTPServer((bind, port), Handler)
+    server.daemon_threads = True
+    server.token = token or secrets.token_urlsafe(32)
+    server.log = lambda line: print(line, file=sys.stderr)
+    return server
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return
+    opts = dict(zip(argv[::2], argv[1::2]))
+    port, bind = opts.pop("--port", "8000"), opts.pop("--bind", "127.0.0.1")
+    if len(argv) % 2 or opts or not port.isdigit() or bind not in BINDS:
+        sys.exit(f"dashboard: bad arguments: {' '.join(argv)}\n\n{__doc__.strip()}")
+    try:
+        server = make_server(int(port), bind=bind)
+    except OSError as e:
+        sys.exit(f"dashboard: can't listen on {bind}:{port} ({e}); try --port")
+    print(f"Dashboard for {FACTORY.parent.name}: http://127.0.0.1:{server.server_address[1]}/?token={server.token}")
+    print("Open that link (it works for this run only). Ctrl-C stops the server.")
+    sys.stdout.flush()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

@@ -7,12 +7,82 @@ Changes from the upstream project are listed in [NOTICE](NOTICE).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-07
+
+Phase 3 of the review roadmap: versioned releases, the shared library, cost
+tracking and two small security fixes. A27, a headless runner per repository,
+waits for the pilot (A18): the roadmap builds it only if the pilot shows the
+need.
+
+### Added
+
+- Versioned installs (A22). `./install` records the release in
+  `factory/VERSION` and a sha256 of every file it placed in
+  `factory/install.json`; two installs of one release are identical.
+  `./install --upgrade` replaces the files you haven't changed, adds new
+  ones, removes dropped ones you never changed, and keeps every file you did
+  change with a `diff -u` command to merge it. `./install --uninstall` takes
+  out what the installer put in. Both refuse a dirty tree and never commit.
+  `doctor` reports changed and missing factory files.
+- `factory/project.md` (A22): the project's facts (what it's for, security
+  hot spots, design system, users, what must always reach a human), which the
+  agents read instead of having their prompts edited per project.
+- `--owner @login` (A22): the installer adds a CODEOWNERS entry naming the
+  factory's owners for `factory/` and `.claude/`.
+- `prompts/` (A22): each agent's prompt is built from a source and blocks
+  shared with other agents by `prompts/build.py`; CI fails when
+  `.claude/agents/` drifts from what it builds.
+- A versioned stage-file format (A23): `job advance` checks intake.md,
+  spec.md, build.md, each review and decision.md against
+  `factory/lib/stage_files.py` before a move that depends on them, and
+  refuses one that drifts, naming the problem. Each prompt names the format
+  version, and a test holds the prompts and the schema together.
+- Orchestrator cost per run (A25): the sessions that ran factory agents are
+  priced too and shared evenly by their jobs, in `job summary` and as
+  `orchestrator_usd` in `job metrics`. The per-job budget still counts the
+  agents only.
+- Cost alerts (A25): transcript lines and usage records that don't parse are
+  counted; the job command, `job summary`, the job's audit trail and `doctor`
+  then say the cost may be low.
+- `prices_owner` (A25): who checks the price table each month. `doctor` warns
+  when no one is named or `prices_checked` is over 31 days old.
+- `factory/bin/dashboard` (A26): serves the board on 127.0.0.1 only, behind a
+  token made for each run and a Host check, so a web page can't read job
+  files through DNS rebinding. It serves the board and the job folders only,
+  every job file as plain text or JSON, and sends no-store, nosniff and
+  frame-denying headers.
+- `github_app.slug` and `github_app.operator` (A26): the App's bot login and
+  the person running the factory.
+
 ### Changed
 
+- `factory/lib` holds the code the scripts share (A23): `factory_config`
+  (one config loader for all six scripts), `branch_diff` (one reading of a
+  branch's diff for the gate and job), `stage_files`, `job_cost`,
+  `issue_text` (issue.md, the factory marker, the outbound filter) and
+  `job_report`. The modules are typed and CI checks them with mypy (pinned
+  in `requirements-dev.txt`, development only).
+- The installer's manifest is expanded from the repository instead of kept by
+  hand, so a new script or module can't be left out of an install.
 - The README's diagrams are SVG images instead of Mermaid, in a light and a
   dark version that follow the reader's GitHub theme. GitHub showed the
   Mermaid diagrams in a small pan-and-zoom box. `docs/images/diagrams.py`
   draws both versions from one layout.
+
+### Security
+
+- The factory marker counts only on comments by the factory's own login
+  (SEC-12): your gh login, or with a GitHub App its bot. Anyone could type the
+  marker before, so a trusted author could speak as the factory in issue.md
+  and reset the reply check.
+- With a GitHub App, no command asks GitHub who you are any more: an
+  installation token can't read a user, so `job create`, `job pause` and the
+  other commands that name the operator failed against real GitHub.
+- The dashboard no longer runs on `python3 -m http.server` (SEC-11), which
+  served all of `factory/` and checked no Host header.
+- The guard blocks a tool call when it can't load `factory/config.json` or
+  the shared library. Its config load crashed with a code Claude Code treats
+  as a non-blocking error, so a broken `config.json` let every call through.
 
 ## [0.3.0] - 2026-11-07
 
