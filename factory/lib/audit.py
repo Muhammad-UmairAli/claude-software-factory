@@ -156,7 +156,7 @@ class Log:
         out: dict[str, dict[str, int]] = {}
         for _, _, rec in self.records():
             if isinstance(rec, dict) and str(rec.get("ts", ""))[:10] >= since:
-                key = rec.get("event") if rec.get("source") != "guard" else f"guard {rec.get('decision', '?')}"
+                key = str(rec.get("event")) if rec.get("source") != "guard" else f"guard {rec.get('decision', '?')}"
                 day = out.setdefault(rec["ts"][:10], {})
                 day[key] = day.get(key, 0) + 1
         return dict(sorted(out.items(), reverse=True))

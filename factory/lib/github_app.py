@@ -105,7 +105,7 @@ def mint(config: Config, repo_root: Union[str, Path]) -> dict[str, Any]:
     """GitHub's reply for a new installation token: token, expires_at, permissions and, when the
     token is limited to named repositories, repositories. Raises AppError; never falls back."""
     app = config["github_app"]
-    body = {"permissions": PERMISSIONS}
+    body: dict[str, Any] = {"permissions": PERMISSIONS}
     name = origin_repo(repo_root)
     if name:
         body["repositories"] = [name]

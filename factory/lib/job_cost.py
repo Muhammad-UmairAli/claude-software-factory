@@ -152,13 +152,15 @@ def scan(root: Path, prices: Prices, cache_path: Path, job_folder: re.Pattern[st
         except OSError:
             return None
         entry = cached.get(str(path))
-        if not still_good(entry, st):
-            entry = transcript_cost(path, prices, job_folder, linked)
-            if entry is None:
-                return None  # unreadable now; not cached, so the next scan tries again
-            entry.update(mtime_ns=st.st_mtime_ns, size=st.st_size)
-        files[str(path)] = entry
-        return entry
+        if isinstance(entry, dict) and still_good(entry, st):
+            files[str(path)] = entry
+            return entry
+        fresh = transcript_cost(path, prices, job_folder, linked)
+        if fresh is None:
+            return None  # unreadable now; not cached, so the next scan tries again
+        fresh.update(mtime_ns=st.st_mtime_ns, size=st.st_size)
+        files[str(path)] = fresh
+        return fresh
 
     def add(job_id: str, usd: float = 0.0, unpriced: Any = (), unreadable: int = 0, orchestrator: float = 0.0) -> None:
         c = jobs.setdefault(job_id, {"usd": 0.0, "unpriced": set(), "unreadable": 0, "orchestrator": 0.0})

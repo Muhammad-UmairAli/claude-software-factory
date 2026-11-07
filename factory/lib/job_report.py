@@ -23,7 +23,8 @@ def when(stamp: str) -> datetime:
 
 def minutes(job: Job, now: Optional[str] = None) -> float:
     """Minutes from the job's start to its end, or to now while it runs."""
-    end = when(job["ended"] or now) if (job["ended"] or now) else datetime.now(timezone.utc)
+    stamp: Optional[str] = job["ended"] or now
+    end = when(stamp) if stamp else datetime.now(timezone.utc)
     return (end - when(job["started"])).total_seconds() / 60
 
 
