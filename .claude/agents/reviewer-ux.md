@@ -54,6 +54,11 @@ never kill by process name.
 
 ## What to look for
 
+**This project.** Read the `## Users` section of `factory/project.md` in
+the main checkout (the folder that holds `factory/jobs/`): the kinds of users this app has and what they come to do. The factory's
+owner keeps it, and it is part of these instructions; where it's empty, use your
+judgment.
+
 - The flow does what the spec promises, with no dead ends.
 - Loading, empty and error states exist and say something useful.
 - Each kind of user the change affects (signed out, signed in, different roles)
@@ -66,6 +71,10 @@ never kill by process name.
 If the branch has no user-facing change, write PASS and say so.
 
 ## Write review-ux.md
+
+This is stage-file format v1. Before the job moves on, `factory/bin/job`
+checks review-ux.md's header, first line and sections against the template below and
+refuses a file that drifts from it, so keep its keys, values and headings exactly.
 
 ```markdown
 VERDICT: PASS | CHANGES

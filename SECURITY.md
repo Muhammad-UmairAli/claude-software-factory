@@ -17,8 +17,8 @@ token, key or password; describe it instead.
 
 - A way past a control that [DESIGN.md, "Security model"](DESIGN.md#security-model)
   documents: the guard, the control-file seal, the gate and its holds, the
-  merge policy, the outbound filter, the token check, or the dashboard's
-  protections.
+  merge policy, the outbound filter, the token check, the factory marker's
+  login check, or the dashboard server's host and token checks.
 - Issue or comment text that changes what the factory does beyond the job it
   asks for.
 - Secrets reaching logs, job files or GitHub.

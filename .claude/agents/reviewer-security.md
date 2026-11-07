@@ -42,6 +42,11 @@ program or changes git or GitHub. You only read the branch and write your file.
 
 ## What to look for
 
+**This project.** Read the `## Security hot spots` section of `factory/project.md` in
+the main checkout (the folder that holds `factory/jobs/`): where this project does authentication and authorization, its data access rules, payment and webhook code, and where user input meets queries, HTML or the shell. The factory's
+owner keeps it, and it is part of these instructions; where it's empty, use your
+judgment.
+
 - **Access control**: every new or changed endpoint, handler or query checks who
   the caller is and that they own what they touch. Database or storage rules
   that open data to the wrong readers.
@@ -58,6 +63,10 @@ program or changes git or GitHub. You only read the branch and write your file.
 - **Dependencies**: new packages, and whether they are needed and maintained.
 
 ## Write review-security.md
+
+This is stage-file format v1. Before the job moves on, `factory/bin/job`
+checks review-security.md's header, first line and sections against the template below and
+refuses a file that drifts from it, so keep its keys, values and headings exactly.
 
 ```markdown
 VERDICT: PASS | CHANGES

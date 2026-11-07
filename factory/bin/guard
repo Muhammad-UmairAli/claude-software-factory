@@ -45,7 +45,13 @@ import time
 from pathlib import Path
 
 REPO = Path(os.path.realpath(Path(__file__).resolve().parents[2]))
-CONFIG = json.loads((REPO / "factory" / "config.json").read_text())
+sys.path.append(str(REPO / "factory" / "lib"))  # appended, so the standard library always wins a name clash
+try:
+    import factory_config  # noqa: E402  (factory/lib: config.json with its defaults, shared by every script)
+    CONFIG = factory_config.load(REPO / "factory")
+except Exception as e:  # fail closed: exit 2 blocks the call, and any other exit would let it through
+    print(f"factory guard: can't load factory/config.json ({type(e).__name__}: {e}); blocked", file=sys.stderr)
+    sys.exit(2)
 BIN = REPO / "factory" / "bin"
 HOME = Path(os.path.realpath(Path.home()))
 JOB_ID = r"\d{3,}-[a-z0-9-]+"
@@ -904,7 +910,6 @@ def log(role, event, decision, reason=None):
         with (jobs / "guard.jsonl").open("a") as f:
             f.write(json.dumps(rec) + "\n")
         # The same decision, hash-chained into the central audit log (factory/lib/audit.py).
-        sys.path.append(str(REPO / "factory" / "lib"))
         import audit
         audit.Log(jobs / "audit", CONFIG).append("guard", "decision", **{k: v for k, v in rec.items() if k != "ts"})
     except Exception:

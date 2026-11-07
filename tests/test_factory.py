@@ -56,6 +56,8 @@ class GuardRepo:
         self.root = Path(os.path.realpath(tempfile.mkdtemp(prefix="factory-guard-")))
         (self.root / "factory" / "bin").mkdir(parents=True)
         shutil.copy(BIN / "guard", self.root / "factory" / "bin" / "guard")
+        shutil.copytree(ROOT / "factory" / "lib", self.root / "factory" / "lib",
+                        ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(ROOT / "factory" / "config.json", self.root / "factory" / "config.json")
         (self.root / ".worktrees").mkdir()
         self.guard = load_script(self.root / "factory" / "bin" / "guard", f"factory_guard_{self.root.name}")
@@ -193,6 +195,19 @@ class GuardTest(unittest.TestCase):
                     "sort -o out.txt in.txt"):
             self.assertFalse(self.allowed("intake", event("Bash", command=cmd)), cmd)
             self.assertFalse(self.allowed("spec-writer", event("Bash", command=cmd)), cmd)
+
+    def test_fails_closed_without_its_config_or_library(self):
+        """Exit 2 blocks the tool call; any other failure would let it through."""
+        shutil.rmtree(self.repo / "factory" / "lib")
+        res = subprocess.run([sys.executable, self.path("factory/bin/guard"), "builder"],
+                             input=json.dumps(self.event("Read", file_path=self.path("README.md"))),
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertIn("blocked", res.stderr)
+        (self.repo / "factory" / "config.json").write_text("{not json")
+        res = subprocess.run([sys.executable, self.path("factory/bin/guard"), "builder"], input="{}",
+                             capture_output=True, text=True)
+        self.assertEqual(res.returncode, 2, res.stderr)
 
     def test_fails_closed_on_bad_input(self):
         res = subprocess.run([sys.executable, self.path("factory/bin/guard"), "builder"], input="not json",
@@ -432,11 +447,11 @@ class PipelineTest(unittest.TestCase):
     def test_gate_fails_protected_paths_and_scrubs_env(self):
         jid = self.box.run("job", "create", "1").stdout.strip()
         jobs = f"factory/jobs/{jid}"
-        self.box.write(f"{jobs}/intake.md", "DECISION: ACCEPT\nRISK: medium\nSURFACES: none\nRESCOPED: no\n\n## Scope\nx\n")
+        self.box.write(f"{jobs}/intake.md", "DECISION: ACCEPT\nRISK: medium\nSURFACES: none\nRESCOPED: no\n\n## Summary\n- x\n\n## Scope\nx\n\n## Acceptance criteria\n1. x\n")
         self.box.agent("intake")
         self.box.run("route", jid)
         self.box.run("job", "advance", jid, "spec")
-        self.box.write(f"{jobs}/spec.md", "# x\n")
+        self.box.write(f"{jobs}/spec.md", "# x\n\n## Summary\n- x\n")
         self.box.agent("spec-writer")
         self.box.run("job", "advance", jid, "build")
         wt = Path(self.box.job(jid)["worktree"])
@@ -470,8 +485,10 @@ class PipelineTest(unittest.TestCase):
 
     def test_lite_intake_needs_acceptance_criteria(self):
         jid = self.box.run("job", "create", "1").stdout.strip()
+        # The format check sees an Acceptance criteria section; the lite spec needs numbered criteria in it.
         self.box.write(f"factory/jobs/{jid}/intake.md",
-                       "DECISION: ACCEPT\nRISK: low\nSURFACES: none\nRESCOPED: no\n\n## Scope\nx\n")
+                       "DECISION: ACCEPT\nRISK: low\nSURFACES: none\nRESCOPED: no\n\n## Summary\n- x\n\n"
+                       "## Scope\nx\n\n## Acceptance criteria\nIt should work well.\n")
         self.box.agent("intake")
         self.box.run("route", jid)
         self.box.run("job", "advance", jid, "spec")
@@ -489,8 +506,7 @@ class PipelineTest(unittest.TestCase):
 
     def test_unguarded_agents_stop_the_job(self):
         jid = self.box.run("job", "create", "1").stdout.strip()
-        self.box.write(f"factory/jobs/{jid}/intake.md",
-                       "DECISION: ACCEPT\nRISK: low\nSURFACES: none\nRESCOPED: no\n\n## Scope\nx\n")
+        self.box.write(f"factory/jobs/{jid}/intake.md", "DECISION: ACCEPT\nRISK: low\nSURFACES: none\nRESCOPED: no\n\n## Summary\n- x\n\n## Scope\nx\n\n## Acceptance criteria\n1. x\n")
         self.box.run("route", jid)
         res = self.box.run("job", "advance", jid, "spec", ok=False)
         self.assertNotEqual(res.returncode, 0, "intake left no guard entry, so its hooks didn't run")

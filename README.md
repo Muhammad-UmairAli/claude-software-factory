@@ -93,17 +93,20 @@ container.
 # 1. Get the factory, pinned to a release tag, next to your project.
 git clone https://github.com/Muhammad-UmairAli/claude-software-factory.git software-factory
 
-# 2. See what the setup command would do, then do it.
+# 2. See what the setup command would do, then do it. Name the factory's owners for CODEOWNERS.
 software-factory/install ~/code/my-project --dry-run
-software-factory/install ~/code/my-project
+software-factory/install ~/code/my-project --owner @you
 ```
 
 `install` refuses anything but a clean git repository, never overwrites a
 file, and never commits. It copies the factory in, drafts
 `factory/checks.sh` from your project's own files (`package.json`,
-`pyproject.toml`, `go.mod`, `Cargo.toml` or a Makefile), sets the base branch,
-adds two lines to `.gitignore` and a short section to `AGENTS.md`, then runs
-`doctor`. Then:
+`pyproject.toml`, `go.mod`, `Cargo.toml` or a Makefile), writes
+`factory/project.md` for your project's facts, sets the base branch, adds two
+lines to `.gitignore`, a short section to `AGENTS.md` and, with `--owner`, a
+CODEOWNERS entry for `factory/` and `.claude/`, then runs `doctor`. It records
+the release in `factory/VERSION` and a hash of every file it placed in
+`factory/install.json`. Then:
 
 ```bash
 cd ~/code/my-project
@@ -122,8 +125,16 @@ factory/bin/runtime shell       # then, inside it:
 Create the four labels (`install` prints the commands, or run it with
 `--create-labels`), label a small issue `factory`, and in Claude Code run
 `/factory run`. [INSTALL.md](INSTALL.md) covers the parts that need judgment:
-tailoring the reviewers' checklists to your stack, `sensitive_paths`, and
-Claude Code settings.
+your project's facts in `factory/project.md` (what it's for, its security hot
+spots, its design system, its users, what must always reach a human),
+`sensitive_paths`, and Claude Code settings.
+
+**Upgrading.** From a copy of the new release, `install --upgrade
+~/code/my-project` replaces the factory's files you haven't changed, keeps the
+ones you have (and prints a `diff -u` for each), and never touches
+`config.json`, `checks.sh` or `project.md`. `install --uninstall` takes out
+what the installer put in, except your changes. Both take `--dry-run`, and
+neither commits.
 
 ## Using it
 
@@ -168,10 +179,11 @@ Everything lives in `factory/config.json`. The defaults are the safe ones.
 | `max_rounds`, `max_cost_usd_per_job` | `3`, `20` | A job that runs out goes to a human instead of another round. |
 | `checks.env_allowlist`, `checks.timeout_sec` | toolchain variables only, `1800` | Branch code under test gets no tokens from the environment, and a hung test can't stall the gate. |
 | `audit` | 10 MB files, kept 365 days, no collector | Set `forward_url` to keep a copy of the log off the machine. |
-| `github_app` | not set | Optional: a GitHub App instead of a token, for one-hour credentials and a bot identity ([RUNBOOK.md](RUNBOOK.md#github-credentials)). |
+| `github_app` | not set | Optional: a GitHub App instead of a token, for one-hour credentials and a bot identity ([RUNBOOK.md](RUNBOOK.md#github-credentials)). Set `slug` (the App's name in its URL) to skip a lookup, and `operator` (your GitHub login) so your own replies on an issue reach the agents. |
 | `models` | `opus` for intake, spec, builder and approver | Every model choice lives here; see [Cost](#cost). |
 | `profiles` | low → `lite`, medium and high → `full` | Change the mapping once your own benchmark says where each pays off. |
 | `sizing` | 8 files, 400 changed lines | Intake rescopes anything bigger; the gate reports a change's real size. |
+| `prices_owner`, `prices_checked` | not set, the release date | Who compares `prices_usd_per_mtok` with the published prices each month, and when they last did. `doctor` warns when no one is named or the check is over 31 days old. |
 
 ## Security model
 
@@ -225,20 +237,35 @@ print: what it means and what to do. The short version:
   files changed since `job seal`". Find out what changed before re-sealing.
 - **The audit log:** `factory/bin/job audit` checks it; `doctor` fails if its
   chain is broken.
-- **Dashboard:** `cd factory && python3 -m http.server --bind 127.0.0.1 8000`,
-  then open <http://127.0.0.1:8000/dashboard.html>. Always bind to
-  `127.0.0.1`: the server lists everything under `factory/`. Inside the
-  container, bind to `0.0.0.0`; the launcher publishes the port on
-  `127.0.0.1` only.
+- **Dashboard:** `factory/bin/dashboard`, then open the link it prints. It
+  listens on `127.0.0.1` only and answers only requests that carry the
+  link's token and name `127.0.0.1` or `localhost`, which stops another web
+  page from reading job files through DNS rebinding. It serves the board and
+  the job folders, never config, scripts or the audit log. Inside the
+  container, run `factory/bin/dashboard --bind 0.0.0.0`; the launcher
+  publishes the port on `127.0.0.1` only.
 
 ## Cost
 
 Cost is the API-equivalent price of each job's agents, read from Claude Code's
-transcripts and priced with `prices_usd_per_mtok` (checked against the
-published price list on the date in `prices_checked`). On a subscription plan
-it shows where the spend goes, not what you're billed. The orchestrator's own
-tokens aren't attributed to jobs, and the transcript format isn't a documented
-interface, so treat the figures as estimates.
+transcripts and priced with `prices_usd_per_mtok`. On a subscription plan it
+shows where the spend goes, not what you're billed. `max_cost_usd_per_job`
+counts a job's agents only, so a job's budget can't move because another job
+shared its session.
+
+- **The orchestrator.** Each session that ran factory agents is a run, and its
+  own tokens are shared evenly by the jobs it worked on: `job summary` totals
+  them per run, and `job metrics` gives each job's share as
+  `orchestrator_usd`. Run the factory in its own session (the runtime container
+  does), or your other work in that session counts too.
+- **When transcripts stop parsing.** The transcript format isn't a documented
+  interface. Lines or usage records the factory can't read are counted, not
+  skipped quietly: the job command, `job summary` and `doctor` then say the
+  cost may be low, and the job's audit trail records it once. Check against
+  your usage before you trust the budget.
+- **The prices.** `prices_owner` names who compares the table with the
+  published prices every month and records the date in `prices_checked`;
+  `doctor` warns when no one is named or the check is over 31 days old.
 
 Fable is the most capable model and costs about 2.5 times Opus per token. Set
 `models.intake` to `fable` if intake's accept, reject and rescope calls need
@@ -256,22 +283,27 @@ written up front.
 ## What's in here
 
 ```text
-install                       the setup command: ./install <project> [--dry-run] [--create-labels]
+install                       the setup command: install, --upgrade or --uninstall a project
+prompts/                      the agents' prompts: one source per agent plus shared blocks; build.py writes .claude/agents/
 .claude/
   skills/factory/SKILL.md     the orchestrator: preflight, queue, concurrency, the pipeline
   agents/                     intake, spec-writer, builder, reviewer-{code,security,ux,ui}, approver
 factory/
   config.json                 every setting above
   checks.sh                   your repository's checks (install drafts it)
+  project.md                  your project's facts, which the agents read (install writes the headings)
+  VERSION, install.json       the release, and the hash of every file install placed
   bin/job                     the only writer of job state; refuses illegal moves; pushes, opens PRs, merges
   bin/gate                    runs checks.sh in a job's worktree
   bin/route                   risk and surfaces → the job's reviewers and models
   bin/guard                   every agent's PreToolUse hook
   bin/doctor                  preflight checks
   bin/runtime                 builds and enters the runtime container
+  bin/dashboard               serves the board on 127.0.0.1, behind a per-run token
   bin/git-credential-app      hands git the GitHub App token, when one is set up
   runtime/                    the container: Dockerfile, entrypoint, egress firewall, allowlist
-  lib/                        the GitHub App identity and the audit log, shared by the scripts
+  lib/                        typed modules the scripts share: config, diff, stage-file format, cost,
+                              issue text, reports, the audit log and the GitHub App identity
   dashboard.html              the board
 docs/images/                  the README's diagrams; python3 docs/images/diagrams.py redraws them
 tests/                        unit, pipeline, guard-corpus, installer and audit tests (fake gh, local git)
@@ -299,7 +331,8 @@ it must block and everyday commands it must allow. `tests/test_transitions.py`
 pins the job state machine. Add a case with every guard or transition change.
 
 CI runs the suite on every pull request on Python 3.10 and 3.12 (Ubuntu) and
-3.12 (macOS), plus pyflakes and ShellCheck. The `runtime` workflow builds the
+3.12 (macOS), plus pyflakes, mypy on `factory/lib`, ShellCheck, and a check
+that `.claude/agents/` is what `prompts/` builds. The `runtime` workflow builds the
 container and checks its user, firewall and tools whenever the runtime
 changes, and weekly. A weekly job fails when a Claude Code release is newer
 than the one the guard hooks were last checked against
@@ -310,7 +343,9 @@ base image current.
 
 Open an issue or a pull request for anything that isn't a vulnerability.
 Changes to the guard need a new case in `tests/test_guard_probes.py`; changes
-to the job state machine need tests in `tests/test_transitions.py`. Report a
+to the job state machine need tests in `tests/test_transitions.py`. Edit the
+agents' prompts in `prompts/`, then run `python3 prompts/build.py`; a change to
+a stage file's format changes `factory/lib/stage_files.py` and its version too. Report a
 vulnerability privately, as [SECURITY.md](SECURITY.md) describes, never in an
 issue: issues are the factory's input.
 

@@ -13,6 +13,8 @@ Standard library only. Appends take an exclusive lock, so the guard (one
 process per tool call, several agents at once) and job never interleave.
 """
 
+from __future__ import annotations
+
 import fcntl
 import hashlib
 import json
@@ -20,22 +22,23 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, Iterator, Optional, Union
 
 GENESIS = "0" * 64
 CURRENT = "audit.jsonl"
 
 
-def now():
+def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def digest(record):
+def digest(record: dict[str, Any]) -> str:
     """The record's hash: sha256 over its canonical JSON without the hash field."""
     body = {k: v for k, v in record.items() if k != "hash"}
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def last_line(path):
+def last_line(path: Union[str, Path]) -> Optional[str]:
     """The last non-empty line of a file, read from its end, or None."""
     try:
         with open(path, "rb") as f:
@@ -49,19 +52,19 @@ def last_line(path):
 
 
 class Log:
-    def __init__(self, folder, config=None):
+    def __init__(self, folder: Union[str, Path], config: Optional[dict[str, Any]] = None) -> None:
         cfg = (config or {}).get("audit") or {}
         self.folder = Path(folder)
         self.max_bytes = int(float(cfg.get("max_mb", 10)) * 1_000_000)
         self.keep_days = float(cfg.get("keep_days", 365))
 
-    def files(self):
+    def files(self) -> list[Path]:
         """Rotated files oldest first, then the current one."""
         rotated = sorted(self.folder.glob("audit-*.jsonl"))
         current = self.folder / CURRENT
         return rotated + ([current] if current.exists() else [])
 
-    def head(self):
+    def head(self) -> tuple[int, str]:
         """(seq, hash) of the newest record, or (0, GENESIS)."""
         for path in reversed(self.files()):
             line = last_line(path)
@@ -73,7 +76,7 @@ class Log:
                     raise ValueError(f"the last record of {path.name} isn't readable; run `job audit`")
         return 0, GENESIS
 
-    def append(self, source, event, **fields):
+    def append(self, source: str, event: str, **fields: Any) -> dict[str, Any]:
         """Chain one record onto the log and return it."""
         self.folder.mkdir(parents=True, exist_ok=True)
         with open(self.folder / ".lock", "a") as lock:
@@ -90,7 +93,7 @@ class Log:
                 f.write(json.dumps(record, sort_keys=True) + "\n")
             return record
 
-    def _rotate(self, current):
+    def _rotate(self, current: Path) -> None:
         """Move the full current file aside, then delete rotated files past the retention period, chaining
         a record that names the last hash each deleted file ended on."""
         first = json.loads(current.open().readline())["seq"]
@@ -108,7 +111,7 @@ class Log:
                 with open(self.folder / CURRENT, "a") as f:
                     f.write(json.dumps(record, sort_keys=True) + "\n")
 
-    def records(self):
+    def records(self) -> Iterator[tuple[str, int, Any]]:
         """Every record, oldest first, with its file name; unreadable lines come back as None."""
         for path in self.files():
             with open(path, errors="replace") as f:
@@ -119,10 +122,14 @@ class Log:
                         except ValueError:
                             yield path.name, n, None
 
-    def verify(self):
+    def verify(self) -> tuple[int, Optional[str]]:
         """(records checked, problem or None). The chain starts from GENESIS, or right after files that
         retention deleted, which only counts when a `pruned` record names the hash they ended on."""
-        count, prev, expect, first, pruned = 0, None, None, None, set()
+        count = 0
+        prev: Optional[str] = None
+        expect: Optional[int] = None
+        first: Optional[tuple[Any, Any, str]] = None
+        pruned: set[Any] = set()
         for name, n, rec in self.records():
             where = f"{name} line {n}"
             if not isinstance(rec, dict) or "hash" not in rec or "prev" not in rec or "seq" not in rec:
@@ -143,13 +150,13 @@ class Log:
                            "retention that removed them")
         return count, None
 
-    def trend(self, days=14):
+    def trend(self, days: int = 14) -> dict[str, dict[str, int]]:
         """{date: {event: count}} for the last `days` days, newest first."""
         since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
-        out = {}
+        out: dict[str, dict[str, int]] = {}
         for _, _, rec in self.records():
             if isinstance(rec, dict) and str(rec.get("ts", ""))[:10] >= since:
-                key = rec.get("event") if rec.get("source") != "guard" else f"guard {rec.get('decision', '?')}"
+                key = str(rec.get("event")) if rec.get("source") != "guard" else f"guard {rec.get('decision', '?')}"
                 day = out.setdefault(rec["ts"][:10], {})
                 day[key] = day.get(key, 0) + 1
         return dict(sorted(out.items(), reverse=True))

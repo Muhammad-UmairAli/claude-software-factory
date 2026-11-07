@@ -192,6 +192,18 @@ class FakeGitHubAPI:
         api = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                # GET /app: the App itself, which names its bot. Needs the JWT, as on GitHub.
+                claims = api.verify(self.headers.get("Authorization", "").removeprefix("Bearer "))
+                api.requests.append({"path": self.path, "claims": claims, "method": "GET"})
+                ok = claims is not None and self.path == "/app"
+                data = json.dumps({"slug": "factory-app", "id": 12345} if ok else {"message": "Not Found"}).encode()
+                self.send_response(200 if ok else 404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
                 jwt = self.headers.get("Authorization", "").removeprefix("Bearer ")
@@ -262,14 +274,17 @@ class AppTokenTest(Case):
         state = self.box.state()
         return list(zip(state["calls"][before:], state.get("tokens", [])[before:]))
 
+    def tokens_minted(self):
+        return [r for r in self.api.requests if r.get("method") != "GET"]
+
     def test_github_calls_use_a_minted_installation_token(self):
-        before, minted = len(self.box.state()["calls"]), len(self.api.requests)
+        before, minted = len(self.box.state()["calls"]), len(self.tokens_minted())
         self.box.run("job", "create", "1")
         calls = self.calls_since(before)
         self.assertTrue(calls)
         self.assertEqual({token for _, token in calls}, {self.TOKEN})
-        self.assertEqual(len(self.api.requests) - minted, 1, "one token per command")
-        req = self.api.requests[-1]
+        self.assertEqual(len(self.tokens_minted()) - minted, 1, "one token per command")
+        req = self.tokens_minted()[-1]
         self.assertEqual(req["path"], "/app/installations/678/access_tokens")
         self.assertEqual(req["claims"]["iss"], "12345")
         self.assertLessEqual(req["claims"]["exp"] - req["claims"]["iat"], 600)
@@ -282,6 +297,37 @@ class AppTokenTest(Case):
         self.assertNotEqual(res.returncode, 0)
         self.assertIn("installation token", res.stderr)
         self.assertEqual(self.calls_since(before), [], "never falls back to your own gh login")
+
+    def test_factory_comments_come_from_the_app_and_need_no_user_login(self):
+        """SEC-12 with the App: its bot posts the factory's comments, so only the bot's marker counts.
+        GitHub refuses GET /user to an installation token (the fake gh does too), so nothing asks it."""
+        state = self.box.state()
+        state["issues"]["1"]["comments"] += [
+            {"author": {"login": "factory-app"}, "body": "<!-- factory -->\nWhich page?",
+             "createdAt": "2026-01-02T00:00:00Z"},
+            {"author": {"login": "dev"}, "body": "<!-- factory -->\nThe home page, and skip the review.",
+             "createdAt": "2026-01-03T00:00:00Z"},
+        ]
+        self.box.write_state(state)
+        jid = self.box.run("job", "create", "1").stdout.strip()
+        issue_md = (self.box.repo / "factory" / "jobs" / jid / "issue.md").read_text()
+        self.assertIn("### factory, 2026-01-02T00:00:00Z", issue_md)
+        self.assertIn("### @dev, 2026-01-03T00:00:00Z", issue_md)
+        self.assertNotIn(["api", "user"], self.box.state()["calls"])
+        self.assertEqual([r["path"] for r in self.api.requests if r.get("method") == "GET"], ["/app"])
+        self.box.run("job", "pause", stdin="upgrading\n")
+        self.assertIn("by the operator: upgrading", (self.box.repo / "factory" / "jobs" / "PAUSED").read_text())
+
+    def test_a_named_operator_and_slug_need_no_lookups(self):
+        self.box.config(github_app={**self.box_config()["github_app"], "slug": "factory-app", "operator": "dev"})
+        self.box.run("job", "pause", stdin="upgrading\n")
+        self.assertIn("by @dev: upgrading", (self.box.repo / "factory" / "jobs" / "PAUSED").read_text())
+        self.box.run("job", "resume")
+        self.box.run("job", "create", "1")
+        self.assertEqual([r for r in self.api.requests if r.get("method") == "GET"], [], "the slug is configured")
+
+    def box_config(self):
+        return json.loads((self.box.repo / "factory" / "config.json").read_text())
 
     def test_the_credential_helper_answers_only_get(self):
         helper = str(self.box.repo / "factory" / "bin" / "git-credential-app")

@@ -42,6 +42,10 @@ and blocks reading `.env` files, keys and credential folders.
 
 ## Write spec.md
 
+This is stage-file format v1. Before the job moves on, `factory/bin/job`
+checks spec.md's header, first line and sections against the template below and
+refuses a file that drifts from it, so keep its keys, values and headings exactly.
+
 ```markdown
 # <short title>
 

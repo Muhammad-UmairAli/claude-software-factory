@@ -48,10 +48,14 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - name: Install the pinned linter
+      - name: Install the pinned linters
         run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
       - name: Pyflakes (the scripts have no .py extension, so they are listed)
-        run: python -m pyflakes install factory/bin/job factory/bin/gate factory/bin/guard factory/bin/route factory/bin/doctor factory/bin/runtime factory/lib/*.py docs/images/diagrams.py tests/*.py
+        run: python -m pyflakes install factory/bin/job factory/bin/gate factory/bin/guard factory/bin/route factory/bin/doctor factory/bin/runtime factory/bin/dashboard factory/lib/*.py prompts/build.py docs/images/diagrams.py tests/*.py
+      - name: Type check the shared modules (mypy.ini)
+        run: python -m mypy
+      - name: The agents' prompts are what prompts/ builds
+        run: python prompts/build.py --check
       - name: ShellCheck
         run: |
           command -v shellcheck >/dev/null || sudo apt-get install -y shellcheck

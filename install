@@ -1,28 +1,42 @@
 #!/usr/bin/env python3
-"""Install the software factory into a project.
+"""Install, upgrade or remove the software factory in a project.
 
 Usage:
-  ./install <project> [--dry-run] [--create-labels]
+  ./install <project> [--owner @login ...] [--create-labels] [--dry-run]
+  ./install --upgrade <project> [--dry-run]
+  ./install --uninstall <project> [--dry-run]
 
-Run it from a copy of this repository. It checks the project, copies the
-factory's files in, drafts factory/checks.sh from the project's own toolchain
-files, sets base_branch, adds the two .gitignore lines and the AGENTS.md (or
-CLAUDE.md) section, then runs `factory/bin/doctor --offline` there. It never
-overwrites a file and never commits: you review the change and merge it
-through the project's normal review.
+Run it from a copy of the release you want. An install checks the project,
+copies the factory's files in, drafts factory/checks.sh from the project's own
+toolchain files, writes factory/project.md for the project's facts, sets
+base_branch, adds the two .gitignore lines, the AGENTS.md (or CLAUDE.md)
+section and, with --owner, a CODEOWNERS entry for factory/ and .claude/, then
+runs `factory/bin/doctor --offline` there. It records the release in
+factory/VERSION and the hash of every file it placed in factory/install.json.
 
+  --owner @login    name an owner of the factory's files in CODEOWNERS (repeat it,
+                    or use @org/team); review is then required for any change to
+                    factory/ or .claude/ where branch protection asks for it
+  --create-labels   also create the factory's GitHub labels with gh (a write to
+                    the project's repository); by default it prints the commands
   --dry-run         print what it would do and change nothing
-  --create-labels   also create the factory's GitHub labels with gh (a write
-                    to the project's repository); by default it prints the
-                    commands
+  --upgrade         bring an installed copy to this release: files you haven't
+                    changed are replaced, files you changed are kept and named
+                    with a diff command, files this release dropped are removed
+                    if unchanged. config.json, checks.sh and project.md are yours
+                    and never touched.
+  --uninstall       remove what the installer put in, except files you changed and
+                    the project's own config.json, checks.sh and project.md
 
-It refuses a folder that isn't the root of a git repository, a repository with
-uncommitted changes, one without an origin, and any file the factory would
-overwrite. The parts that need judgment stay with you: read the drafted
-checks.sh, tailor the reviewers' checklists, and decide on Claude Code
+It never commits: you review the change and merge it through the project's
+normal review. It refuses a folder that isn't the root of a git repository, a
+repository with uncommitted changes, one without an origin, and any file an
+install would overwrite. The parts that need judgment stay with you: read the
+drafted checks.sh, fill in factory/project.md, and decide on Claude Code
 settings (INSTALL.md, step 2).
 """
 
+import hashlib
 import json
 import re
 import shutil
@@ -32,40 +46,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-# Copied unchanged. factory/checks.sh is written for the project instead, and LICENSE and NOTICE
-# go to factory/ so the license and attribution travel with the files. Keep INSTALL.md's list in step.
-MANIFEST = [
-    ".claude/skills/factory/SKILL.md",
-    ".claude/agents/intake.md",
-    ".claude/agents/spec-writer.md",
-    ".claude/agents/builder.md",
-    ".claude/agents/reviewer-code.md",
-    ".claude/agents/reviewer-security.md",
-    ".claude/agents/reviewer-ux.md",
-    ".claude/agents/reviewer-ui.md",
-    ".claude/agents/approver.md",
-    "factory/config.json",
-    "factory/bin/job",
-    "factory/bin/gate",
-    "factory/bin/route",
-    "factory/bin/guard",
-    "factory/bin/doctor",
-    "factory/bin/git-credential-app",
-    "factory/bin/runtime",
-    "factory/lib/github_app.py",
-    "factory/lib/audit.py",
-    "factory/runtime/Dockerfile",
-    "factory/runtime/entrypoint.sh",
-    "factory/runtime/init-firewall.sh",
-    "factory/runtime/egress-allowlist",
-    "factory/dashboard.html",
-]
+# The factory's own files, copied unchanged and recorded in factory/install.json so an upgrade can
+# replace them. Expanded from this repository at run time, sorted, so nothing new is missed. LICENSE and
+# NOTICE go to factory/ so the license and attribution travel with the files. Keep INSTALL.md's list in step.
+FACTORY_FILES = [".claude/agents/*.md", ".claude/skills/factory/SKILL.md", "factory/VERSION", "factory/bin/*",
+                 "factory/lib/*.py", "factory/runtime/*", "factory/dashboard.html"]
+MANIFEST = sorted({str(path.relative_to(ROOT)) for pattern in FACTORY_FILES for path in ROOT.glob(pattern)
+                   if path.is_file() and "__pycache__" not in path.parts})
 EXTRA = {"LICENSE": "factory/LICENSE", "NOTICE": "factory/NOTICE"}
 EXECUTABLE = ("factory/bin/", "factory/runtime/entrypoint.sh", "factory/runtime/init-firewall.sh")
+# The project's own files: written once by the install, then never replaced or removed by the installer.
+PROJECT_FILES = ["factory/checks.sh", "factory/config.json", "factory/project.md"]
+RECORD = "factory/install.json"
+BEGIN, END = "software-factory:begin", "software-factory:end"
+OWNER = re.compile(r"@[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:/[A-Za-z0-9._-]+)?")
 
 GITIGNORE = ["/factory/jobs/", "/.worktrees/"]
 
-PROJECT_SECTION = """
+PROJECT_SECTION = f"""
+<!-- {BEGIN} -->
 ## Software factory
 
 `/factory run` builds every open GitHub issue labeled `factory` through
@@ -73,12 +72,41 @@ intake → spec → build → gate → review → approve, one PR per issue; a h
 merges unless `auto_merge` allows it. State is in `factory/jobs/`
 (gitignored); `factory/bin/job` is its only writer. Checks:
 `factory/checks.sh`. Preflight: `factory/bin/doctor`. Dashboard:
-`cd factory && python3 -m http.server --bind 127.0.0.1 8000`, then open
-http://127.0.0.1:8000/dashboard.html.
+`factory/bin/dashboard`, then open the link it prints.
 
 Each job works in its own git worktree, a full checkout of the repo at
 `.worktrees/<job-id>` (gitignored). A tool run from the repo root that doesn't
 read `.gitignore` sees those copies too; exclude `.worktrees/` in its config.
+This project's facts for the factory's agents are in `factory/project.md`.
+<!-- {END} -->
+"""
+
+PROJECT_FACTS = """# Project facts for the software factory
+
+The factory's agents read this file: its prompts are generic, so an upgrade
+can replace them, and what is particular to this project lives here. Keep each
+section short and factual. It is a control file: changes go through review like
+code, and the factory's seal stops a run if it changes mid-run.
+
+## What this project is for
+Intake reads this to tell what belongs here. One or two sentences.
+
+## Security hot spots
+The security reviewer looks hardest here: where this project does
+authentication and authorization, its data access rules, payment and webhook
+code, and where user input meets queries, HTML or the shell.
+
+## Design system
+The UI reviewer checks changes against these: where the design tokens, theme
+and shared components live.
+
+## Users
+The UX reviewer judges flows for these people: the kinds of users the app has
+and what they come to do.
+
+## Always escalate
+The approver sends these to a human whatever else holds: changes this project
+never merges without a person looking.
 """
 
 LABELS = [
@@ -117,11 +145,14 @@ def check_project(project):
         die("the project has no `origin` remote; the factory works through a GitHub repository")
     if "github.com" not in origin.stdout:
         print(f"note: origin ({origin.stdout.strip()}) isn't on github.com; the factory talks to GitHub through gh")
-    clashes = [rel for rel in MANIFEST + list(EXTRA.values()) + ["factory/checks.sh"] if (project / rel).exists()]
+    return base_branch(project)
+
+
+def check_clashes(project):
+    clashes = [rel for rel in MANIFEST + list(EXTRA.values()) + PROJECT_FILES + [RECORD] if (project / rel).exists()]
     if clashes:
         die("these files already exist, and the installer never overwrites:\n  " + "\n  ".join(clashes)
-            + "\nIf the factory is already installed, update it by hand (INSTALL.md) for now.")
-    return base_branch(project)
+            + "\nIf the factory is already installed, run ./install --upgrade from a copy of the new release.")
 
 
 def base_branch(project):
@@ -214,55 +245,132 @@ def label_commands():
             for name, color, desc in LABELS]
 
 
-def main(argv):
-    args = [a for a in argv if not a.startswith("--")]
-    flags = {a for a in argv if a.startswith("--")}
-    if len(args) != 1 or flags - {"--dry-run", "--create-labels"}:
-        print(__doc__.strip(), file=sys.stderr)
-        sys.exit(2)
-    if sys.version_info < (3, 10):
-        die("the factory needs Python 3.10 or later")
-    project = Path(args[0]).expanduser().resolve()
-    dry = "--dry-run" in flags
+def digest(path):
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def placed():
+    """{destination: source} for every file the factory owns in a project."""
+    return {**{rel: ROOT / rel for rel in MANIFEST}, **{dst: ROOT / src for src, dst in EXTRA.items()}}
+
+
+def version():
+    return (ROOT / "factory/VERSION").read_text().strip()
+
+
+def write_record(project, files, added):
+    """factory/install.json: the release and each placed file's hash, sorted, with no timestamps, so two
+    installs of one release write the same record."""
+    record = {"version": version(), "files": dict(sorted(files.items())), "added": added}
+    (project / RECORD).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+
+def read_record(project):
+    try:
+        record = json.loads((project / RECORD).read_text())
+        if not isinstance(record.get("files"), dict):
+            raise ValueError("no files")
+        return record
+    except (OSError, ValueError, AttributeError) as e:
+        die(f"can't read {RECORD} ({e}). It records what ./install placed; a copy installed by hand or "
+            "before 0.4.0 has none. Remove the factory's files (INSTALL.md lists them), keep your config.json, "
+            "checks.sh and tailoring notes, and install again")
+
+
+def copy(src, project, rel):
+    dst = project / rel
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    if rel.startswith(EXECUTABLE):
+        dst.chmod(0o755)
+
+
+def codeowners_file(project):
+    """The CODEOWNERS file GitHub reads: .github/, the root or docs/, else a new .github/CODEOWNERS."""
+    for rel in (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"):
+        if (project / rel).exists():
+            return rel
+    return ".github/CODEOWNERS"
+
+
+def append(path, text):
+    old = path.read_text() if path.exists() else ""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(old + ("" if not old or old.endswith("\n") else "\n") + text)
+
+
+def cut_block(path):
+    """Remove the installer's block (between the begin and end markers) from a file; delete the file if
+    nothing else is left. Returns whether anything was removed."""
+    if not path.exists():
+        return False
+    text = path.read_text()
+    pattern = re.compile(rf"\n?[^\n]*{re.escape(BEGIN)}[^\n]*\n.*?[^\n]*{re.escape(END)}[^\n]*\n?", re.S)
+    new, n = pattern.subn("\n", text)
+    if not n:
+        return False
+    new = new.strip("\n")
+    if new:
+        path.write_text(new + "\n")
+    else:
+        path.unlink()
+    return True
+
+
+def prune(project, rel):
+    """Remove the folders above a removed file that are now empty, up to the project root."""
+    for parent in (project / rel).parents:
+        if parent == project or not parent.is_dir() or any(parent.iterdir()):
+            break
+        parent.rmdir()
+
+
+def install(project, flags, owners):
     base = check_project(project)
+    check_clashes(project)
     cmds, sources = detect_checks(project)
     script = checks_script(cmds, sources)
     notes = instructions_file(project)
     ignored = [line for line in GITIGNORE
                if git(project, "check-ignore", "-q", line.strip("/") + "x", check=False).returncode != 0]
+    owners_rel = codeowners_file(project) if owners else None
 
-    print(f"Installing the software factory into {project} (base branch {base})")
+    print(f"Installing the software factory {version()} into {project} (base branch {base})")
     print("\nCopy:\n  " + "\n  ".join(MANIFEST + [f"{src} -> {dst}" for src, dst in EXTRA.items()]))
     print("\nWrite factory/checks.sh:\n  " + script.rstrip().replace("\n", "\n  "))
-    print(f"\nSet base_branch to {base} in factory/config.json")
+    print(f"\nWrite factory/project.md (the project's facts for the agents) and {RECORD}")
+    print(f"Set base_branch to {base} in factory/config.json")
     if ignored:
         print(f"Add to .gitignore: {', '.join(ignored)}")
     if "## Software factory" not in (notes.read_text() if notes.exists() else ""):
         print(f"Add the '## Software factory' section to {notes.name}")
-    if dry:
+    if owners_rel:
+        print(f"Add /factory/ and /.claude/ to {owners_rel} for {' '.join(owners)}")
+    if "--dry-run" in flags:
         print("\nDry run: nothing was changed.")
         return
 
-    for rel in MANIFEST:
-        dst = project / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / rel, dst)
-    for src, dst in EXTRA.items():
-        shutil.copy2(ROOT / src, project / dst)
+    files = {}
+    for dst, src in placed().items():
+        copy(src, project, dst)
+        files[dst] = digest(project / dst)
     (project / "factory/checks.sh").write_text(script)
-    for path in [project / rel for rel in MANIFEST if rel.startswith(EXECUTABLE)] + [project / "factory/checks.sh"]:
-        path.chmod(0o755)
-    cfg_path = project / "factory/config.json"
-    cfg = json.loads(cfg_path.read_text())
+    (project / "factory/checks.sh").chmod(0o755)
+    (project / "factory/project.md").write_text(PROJECT_FACTS)
+    cfg = json.loads((ROOT / "factory/config.json").read_text())
     cfg["base_branch"] = base
-    cfg_path.write_text(json.dumps(cfg, indent=2) + "\n")
+    (project / "factory/config.json").write_text(json.dumps(cfg, indent=2) + "\n")
     if ignored:
-        gi = project / ".gitignore"
-        text = gi.read_text() if gi.exists() else ""
-        gi.write_text(text + ("" if not text or text.endswith("\n") else "\n") + "\n".join(ignored) + "\n")
-    text = notes.read_text() if notes.exists() else ""
-    if "## Software factory" not in text:
-        notes.write_text(text + ("" if not text or text.endswith("\n") else "\n") + PROJECT_SECTION)
+        append(project / ".gitignore", "\n".join(ignored) + "\n")
+    added_notes = None
+    if "## Software factory" not in (notes.read_text() if notes.exists() else ""):
+        append(notes, PROJECT_SECTION)
+        added_notes = notes.name
+    if owners_rel:
+        who = " ".join(owners)
+        append(project / owners_rel, f"# {BEGIN}: changes to the factory need its owners' review (DEP-3)\n"
+                                     f"/factory/ {who}\n/.claude/ {who}\n# {END}\n")
+    write_record(project, files, {"gitignore": ignored, "notes": added_notes, "codeowners": owners_rel})
 
     if "--create-labels" in flags:
         for cmd in label_commands():
@@ -273,21 +381,172 @@ def main(argv):
         print("\nCreate the labels on GitHub (or rerun with --create-labels):")
         for cmd in label_commands():
             print("  " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
-
-    print("\nPreflight (factory/bin/doctor --offline):")
-    doctor = subprocess.run([str(project / "factory/bin/doctor"), "--offline"], cwd=project,
-                            capture_output=True, text=True)
-    print("  " + (doctor.stdout + doctor.stderr).strip().replace("\n", "\n  "))
-
+    if not owners:
+        print("\nNo --owner given: add a CODEOWNERS entry for /factory/ and /.claude/ naming the factory's owners,\n"
+              "so a pull request can't weaken the guard or the config without them (or rerun on a clean tree).")
+    preflight(project)
     print(f"""
-Installed. Nothing is committed. Next:
+Installed {version()}. Nothing is committed. Next:
   1. Read factory/checks.sh and run it once: cd {project} && bash factory/checks.sh
-  2. Tailor the reviewers' checklists and decide on Claude Code settings (INSTALL.md, step 2).
+  2. Fill in factory/project.md, the facts the agents read, and decide on Claude Code settings
+     (INSTALL.md, step 2).
   3. Commit on a branch and merge through review: the factory branches every job from
      origin/{base}, so the install must be there before the first run.
   4. Use a fine-grained GitHub token for this repository only (RUNBOOK.md, GitHub credentials).
   5. Build the runtime container (factory/bin/runtime build), start it (factory/bin/runtime shell),
      open claude there, accept the folder trust prompt, run factory/bin/doctor, then /factory run.""")
+
+
+def upgrade(project, flags):
+    check_project(project)
+    record = read_record(project)
+    old = record["files"]
+    new = placed()
+    plan = {"add": [], "update": [], "keep": [], "remove": [], "leave": []}
+    for dst, src in new.items():
+        here = project / dst
+        if not here.exists():
+            plan["add"].append(dst)
+        elif digest(here) == digest(src):
+            continue
+        elif old.get(dst) == digest(here):
+            plan["update"].append(dst)
+        else:
+            plan["keep"].append(dst)
+    for dst in sorted(set(old) - set(new)):
+        here = project / dst
+        if here.exists():
+            plan["remove" if digest(here) == old[dst] else "leave"].append(dst)
+    ours = json.loads((ROOT / "factory/config.json").read_text())
+    try:
+        theirs = json.loads((project / "factory/config.json").read_text())
+    except (OSError, ValueError):
+        theirs = {}
+    missing_keys = sorted(set(ours) - set(theirs))
+
+    print(f"Upgrading the software factory in {project} from {record.get('version', '?')} to {version()}")
+    for verb, key in (("Add", "add"), ("Replace (unchanged since install)", "update"),
+                      ("Remove (dropped from this release)", "remove")):
+        if plan[key]:
+            print(f"\n{verb}:\n  " + "\n  ".join(plan[key]))
+    if plan["keep"]:
+        print("\nKeep (you changed them; compare with this release and merge by hand):\n  "
+              + "\n  ".join(f"{dst}: diff -u {project / dst} {new[dst]}" for dst in plan["keep"]))
+    if plan["leave"]:
+        print("\nLeave (dropped from this release, but you changed them; delete them when you're done):\n  "
+              + "\n  ".join(plan["leave"]))
+    if missing_keys:
+        print(f"\nfactory/config.json is yours and isn't changed. This release's config also has: "
+              f"{', '.join(missing_keys)}. The scripts use defaults for them; see README's Configuration.")
+    if not (project / "factory/project.md").exists():
+        print("\nWrite factory/project.md (new in this release): move your tailoring of the agents there.")
+    if "--dry-run" in flags:
+        print("\nDry run: nothing was changed.")
+        return
+
+    files = {}
+    for dst, src in new.items():
+        if dst in plan["add"] or dst in plan["update"]:
+            copy(src, project, dst)
+        if dst in plan["keep"]:
+            files[dst] = old.get(dst) or digest(src)  # not your content's hash, so the file stays yours
+        elif (project / dst).exists():
+            files[dst] = digest(project / dst)
+    for dst in plan["leave"]:
+        files[dst] = old[dst]
+    for dst in plan["remove"]:
+        (project / dst).unlink()
+        prune(project, dst)
+    if not (project / "factory/project.md").exists():
+        (project / "factory/project.md").write_text(PROJECT_FACTS)
+    write_record(project, files, record.get("added") or {})
+    preflight(project)
+    print(f"\nUpgraded to {version()}. Nothing is committed: review the diff, commit it on a branch and merge "
+          "it through review. Run /factory run's preflight again after the merge.")
+
+
+def uninstall(project, flags):
+    check_project(project)
+    record = read_record(project)
+    open_jobs = []
+    for job_file in sorted((project / "factory/jobs").glob("*/job.json")):
+        try:
+            if json.loads(job_file.read_text()).get("stage") not in {"merged", "rejected"}:
+                open_jobs.append(job_file.parent.name)
+        except (OSError, ValueError):
+            open_jobs.append(job_file.parent.name)
+    if open_jobs:
+        die(f"jobs are still open: {', '.join(open_jobs)}. Finish or cancel them (factory/bin/job cancel) first")
+    remove, keep = [], []
+    for dst, recorded in sorted(record["files"].items()):
+        here = project / dst
+        if here.exists():
+            (remove if digest(here) == recorded else keep).append(dst)
+    added = record.get("added") or {}
+    print(f"Removing the software factory {record.get('version', '?')} from {project}")
+    if remove:
+        print("\nRemove:\n  " + "\n  ".join(remove + [RECORD]))
+    if keep:
+        print("\nKeep (you changed them since install; delete them yourself if you don't need them):\n  "
+              + "\n  ".join(keep))
+    print("\nKeep the project's own " + ", ".join(rel for rel in PROJECT_FILES if (project / rel).exists())
+          + ", and factory/jobs/ (job state and the audit log); delete them when you no longer need them.")
+    if "--dry-run" in flags:
+        print("\nDry run: nothing was changed.")
+        return
+    for dst in remove:
+        (project / dst).unlink()
+        prune(project, dst)
+    (project / RECORD).unlink()
+    if added.get("notes"):
+        cut_block(project / added["notes"])
+    if added.get("codeowners"):
+        cut_block(project / added["codeowners"])
+        prune(project, added["codeowners"])
+    gi = project / ".gitignore"
+    if added.get("gitignore") and gi.exists():
+        lines = [line for line in gi.read_text().splitlines() if line not in set(added["gitignore"])]
+        if any(line.strip() for line in lines):
+            gi.write_text("\n".join(lines).rstrip("\n") + "\n")
+        else:
+            gi.unlink()
+    print("\nRemoved. Nothing is committed: review the diff and commit it.")
+
+
+def preflight(project):
+    print("\nPreflight (factory/bin/doctor --offline):")
+    doctor = subprocess.run([str(project / "factory/bin/doctor"), "--offline"], cwd=project,
+                            capture_output=True, text=True)
+    print("  " + (doctor.stdout + doctor.stderr).strip().replace("\n", "\n  "))
+
+
+def main(argv):
+    owners, rest, flags = [], [], set()
+    it = iter(argv)
+    for a in it:
+        if a == "--owner":
+            owner = next(it, "")
+            if not OWNER.fullmatch(owner):
+                die(f"--owner takes a GitHub login or team, like @alice or @acme/factory-owners, not {owner!r}")
+            owners.append(owner)
+        elif a.startswith("--"):
+            flags.add(a)
+        else:
+            rest.append(a)
+    modes = flags & {"--upgrade", "--uninstall"}
+    known = {"--dry-run", "--create-labels", "--upgrade", "--uninstall"}
+    if len(rest) != 1 or flags - known or len(modes) > 1 or (modes and (owners or "--create-labels" in flags)):
+        print(__doc__.strip(), file=sys.stderr)
+        sys.exit(2)
+    if sys.version_info < (3, 10):
+        die("the factory needs Python 3.10 or later")
+    project = Path(rest[0]).expanduser().resolve()
+    if "--upgrade" in flags:
+        upgrade(project, flags)
+    elif "--uninstall" in flags:
+        uninstall(project, flags)
+    else:
+        install(project, flags, owners)
 
 
 if __name__ == "__main__":

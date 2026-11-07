@@ -10,11 +10,13 @@ fails, so the orchestrator stops before it starts a job on a broken install.
 """
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -22,6 +24,7 @@ FACTORY = REPO / "factory"
 sys.path.append(str(FACTORY / "lib"))  # appended, so the standard library always wins a name clash
 import github_app  # noqa: E402  (factory/lib: the GitHub App identity shared with job)
 import audit  # noqa: E402  (factory/lib: the hash-chained audit log)
+import factory_config  # noqa: E402  (factory/lib: config.json, read the way every script reads it)
 AGENTS = REPO / ".claude" / "agents"
 MODELS = {"haiku", "sonnet", "opus", "fable"}
 RISKS = ["low", "medium", "high"]
@@ -55,7 +58,7 @@ def frontmatter(path):
 
 def check_config():
     try:
-        cfg = json.loads((FACTORY / "config.json").read_text())
+        cfg = factory_config.read(FACTORY)
     except (OSError, ValueError) as e:
         report("FAIL", f"factory/config.json doesn't parse: {e}")
         return None
@@ -409,6 +412,83 @@ def check_ci_wait(cfg):
                        "list your CI's check names in ci.required_checks so a slow workflow can't be missed")
 
 
+def check_install():
+    """The files ./install placed are all there and match the hashes it recorded (DEP-1). A changed file is
+    allowed (an upgrade keeps it) but named; a missing one fails, since a script or prompt is gone."""
+    record_path = FACTORY / "install.json"
+    try:
+        marker = (FACTORY / "VERSION").read_text().strip()
+    except OSError:
+        marker = None
+    if not record_path.exists():
+        report("warn", f"no factory/install.json: this copy{' (' + marker + ')' if marker else ''} wasn't placed "
+                       "by ./install, so an upgrade can't tell your changes from the release")
+        return
+    try:
+        record = json.loads(record_path.read_text())
+        files = record["files"]
+        release = record["version"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        report("FAIL", f"factory/install.json can't be read ({e}); reinstall from a copy of the release")
+        return
+    missing, changed = [], []
+    for rel, recorded in sorted(files.items()):
+        path = REPO / rel
+        if not path.is_file():
+            missing.append(rel)
+        elif "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() != recorded:
+            changed.append(rel)
+    if missing:
+        report("FAIL", f"factory {release}: missing: {', '.join(missing)}; run ./install --upgrade from a copy of "
+                       "the release")
+    if changed:
+        shown = ", ".join(changed[:6]) + (f" and {len(changed) - 6} more" if len(changed) > 6 else "")
+        report("warn", f"factory {release}: changed since install: {shown}. ./install --upgrade keeps them and "
+                       "shows the release's version to compare")
+    if marker != release:
+        report("warn", f"factory/VERSION says {marker} but factory/install.json records {release}")
+    if not missing and not changed:
+        report("ok", f"factory {release}: {len(files)} files as installed")
+
+
+PRICE_CHECK_DAYS = 31  # the price table's owner compares it with the published prices every month
+
+
+def check_prices(cfg):
+    """The price table has a named owner who checks it against the published prices each month (MON-3):
+    stale prices make every reported cost, and the per-job budget, drift from the bill."""
+    owner = cfg.get("prices_owner")
+    m = re.match(r"\s*(\d{4}-\d{2}-\d{2})", str(cfg.get("prices_checked") or ""))
+    try:
+        checked = date.fromisoformat(m.group(1)) if m else None
+    except ValueError:
+        checked = None
+    if not owner:
+        report("warn", "prices_owner isn't set: name who checks prices_usd_per_mtok against the published "
+                       "prices every month")
+    elif checked is None:
+        report("warn", f"prices_checked has no date: {owner} should compare the price table with the published "
+                       "prices and record the date (YYYY-MM-DD, then the source)")
+    elif (age := (date.today() - checked).days) > PRICE_CHECK_DAYS:
+        report("warn", f"prices were last checked {age} days ago, on {checked}: {owner} checks them monthly; "
+                       "compare prices_usd_per_mtok with the published prices and update prices_checked")
+    else:
+        report("ok", f"prices checked {age} days ago by {owner}")
+
+
+def check_cost_records():
+    """Transcripts the last cost scan couldn't fully read: what it reports may be low (MON-3)."""
+    try:
+        files = json.loads((FACTORY / "jobs" / ".cost-cache.json").read_text())["files"]
+        bad = [e["unreadable"] for e in files.values() if isinstance(e.get("unreadable"), int) and e["unreadable"]]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    if bad:
+        report("warn", f"cost: {sum(bad)} record(s) in {len(bad)} transcript(s) couldn't be read, so reported "
+                       "costs may be low; Claude Code's transcript format may have changed (`job summary` names "
+                       "the jobs)")
+
+
 def check_audit(cfg):
     """The audit log's hash chain is intact; `job audit` shows where it breaks."""
     count, problem = audit.Log(FACTORY / "jobs" / "audit", cfg).verify()
@@ -497,7 +577,10 @@ def main(argv):
     check_mcp()
     if cfg is not None:
         check_files(cfg)
+        check_install()
         check_ci_wait(cfg)
+        check_prices(cfg)
+        check_cost_records()
         check_audit(cfg)
         app_token = check_app(cfg, offline)
         if not offline:

@@ -73,7 +73,7 @@ have someone else collect the diffs):
 | **Human minutes** | Time spent reviewing, answering questions and fixing, per ticket. |
 | **Defects** | Bugs found in review or within two weeks after merge. |
 | **Scope** | Did it change anything the ticket didn't ask for? |
-| **Cost** | API-equivalent USD (factory: `cost_usd`; single prompt: session cost). |
+| **Cost** | API-equivalent USD (factory: `cost_usd` plus `orchestrator_usd`; single prompt: session cost). |
 | **Wall time** | Minutes from start to PR ready. |
 
 Fill one row per ticket and arm in `benchmark/results-template.csv`, saved as
@@ -105,6 +105,7 @@ Record the decision, the thresholds and the table in a short note, and set
   Rotate the order of arms per ticket.
 - **Hidden-test leakage.** If the tests sit in the repo, every arm can read
   them. Keep them outside until scoring.
-- **Cost accounting.** Factory cost excludes the orchestrator session; add it
-  from `/cost` in the session that ran `/factory run` and spread it across the
-  tickets of that run.
+- **Cost accounting.** A job's `cost_usd` is its agents. Add `orchestrator_usd`,
+  its even share of the sessions that ran it, for the factory's full cost per
+  ticket, and run the factory in a session of its own so other work doesn't
+  count. If `job summary` says a cost may be low, check it against `/cost`.
